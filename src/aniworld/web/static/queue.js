@@ -104,9 +104,19 @@ async function loadQueue() {
   }
 }
 
+// Statuses where the worker is holding the item right now. 'downloading' was
+// called 'running' before the import states were added; it is still accepted so
+// a browser tab left open across an upgrade keeps rendering.
+const ACTIVE_STATUSES = ["downloading", "verifying", "running"];
+const FINISHED_STATUSES = ["completed", "imported", "failed", "cancelled"];
+
+function isActiveStatus(status) {
+  return ACTIVE_STATUSES.indexOf(status) !== -1;
+}
+
 function updateBadge(items) {
   const active = items.filter(
-    (i) => i.status === "queued" || i.status === "running",
+    (i) => i.status === "queued" || i.status === "paused" || isActiveStatus(i.status),
   ).length;
   const badge = document.getElementById("queueBadge");
   if (active > 0) {
@@ -121,15 +131,12 @@ function renderQueue(items) {
   const list = document.getElementById("queueList");
 
   // Show active items on top, then last 3 finished (newest first)
-  const running = items.filter((i) => i.status === "running");
-  const queued = items.filter((i) => i.status === "queued");
+  const running = items.filter((i) => isActiveStatus(i.status));
+  const queued = items.filter(
+    (i) => i.status === "queued" || i.status === "paused",
+  );
   const done = items
-    .filter(
-      (i) =>
-        i.status === "completed" ||
-        i.status === "failed" ||
-        i.status === "cancelled",
-    )
+    .filter((i) => FINISHED_STATUSES.indexOf(i.status) !== -1)
     .slice(-3)
     .reverse();
   const visible = running.concat(queued, done);
@@ -147,7 +154,7 @@ function renderQueue(items) {
 
   let html = "";
   visible.forEach((item) => {
-    const isRunning = item.status === "running";
+    const isRunning = isActiveStatus(item.status);
     const isActive =
       isRunning || (item.status === "cancelled" && item.current_url);
     const cls = isActive ? "queue-item queue-item-active" : "queue-item";
@@ -155,12 +162,21 @@ function renderQueue(items) {
     const isCancelling = item.status === "cancelled" && item.current_url;
 
     let statusBadge = "";
-    if (item.status === "running")
+    if (item.status === "downloading" || item.status === "running")
       statusBadge =
         '<span class="queue-status queue-status-running">In Progress</span>';
+    else if (item.status === "verifying")
+      statusBadge =
+        '<span class="queue-status queue-status-verifying">Verifying</span>';
     else if (item.status === "queued")
       statusBadge =
         '<span class="queue-status queue-status-queued">Queued</span>';
+    else if (item.status === "paused")
+      statusBadge =
+        '<span class="queue-status queue-status-paused">Paused</span>';
+    else if (item.status === "imported")
+      statusBadge =
+        '<span class="queue-status queue-status-imported">Imported</span>';
     else if (item.status === "completed")
       statusBadge =
         '<span class="queue-status queue-status-completed">Completed</span>';
@@ -303,10 +319,26 @@ function renderQueue(items) {
         '<button class="queue-move" onclick="moveQueueItem(' +
         item.id +
         ',\'down\')" title="Move down">&#9660;</button>' +
+        '<button class="queue-pause" onclick="pauseQueueItem(' +
+        item.id +
+        ')" title="Pause">&#10074;&#10074;</button>' +
         '<button class="queue-remove" onclick="removeQueueItem(' +
         item.id +
         ')" title="Remove">&times;</button>';
-    } else if (item.status === "running") {
+    } else if (item.status === "paused") {
+      actionBtn =
+        '<button class="queue-resume" onclick="resumeQueueItem(' +
+        item.id +
+        ')" title="Resume">&#9654;</button>' +
+        '<button class="queue-remove" onclick="removeQueueItem(' +
+        item.id +
+        ')" title="Remove">&times;</button>';
+    } else if (item.status === "failed") {
+      actionBtn =
+        '<button class="queue-retry-btn" onclick="retryQueueItem(' +
+        item.id +
+        ')" title="Retry">&#8635; Retry</button>';
+    } else if (isRunning) {
       const captchaBtn = item.captcha_url
         ? '<button class="queue-captcha-btn" onclick="openCaptchaModal(' +
         item.id +
@@ -339,6 +371,47 @@ function renderQueue(items) {
       ? '<span class="queue-sync-badge">[Sync]</span> '
       : "";
 
+    // Priority is only worth showing when it differs from the default, so the
+    // common case stays uncluttered.
+    const priorityHtml = item.priority
+      ? '<span class="queue-priority" title="Priority">&#9650; ' +
+      escQ(String(item.priority)) +
+      "</span>"
+      : "";
+
+    const typeHtml = item.media_type
+      ? '<span class="queue-media-type">' + escQ(item.media_type) + "</span>"
+      : "";
+
+    // Attempts matter while a retry is pending: without them a queued item
+    // that keeps failing looks identical to one that never ran.
+    const attempts = item.attempts || 0;
+    const attemptsHtml = attempts
+      ? '<span class="queue-attempts" title="Retry attempts">&#8635; ' +
+      attempts +
+      (item.max_attempts ? "/" + item.max_attempts : "") +
+      "</span>"
+      : "";
+
+    const retryAtHtml = item.next_attempt_at
+      ? '<span class="queue-retry-at" title="Waiting out the retry backoff">next try ' +
+      escQ(item.next_attempt_at) +
+      " UTC</span>"
+      : "";
+
+    let importHtml = "";
+    if (item.import_status && item.import_status !== "imported") {
+      importHtml =
+        '<div class="queue-import-note">Not imported: ' +
+        escQ(item.import_status.replace(/_/g, " ")) +
+        "</div>";
+    }
+
+    const lastErrorHtml =
+      item.last_error && item.status !== "failed"
+        ? '<div class="queue-last-error">' + escQ(item.last_error) + "</div>"
+        : "";
+
     html +=
       '<div class="' +
       cls +
@@ -366,10 +439,16 @@ function renderQueue(items) {
       "<span>" +
       escQ(item.provider) +
       "</span>" +
+      typeHtml +
+      priorityHtml +
+      attemptsHtml +
+      retryAtHtml +
       pathHtml +
       userHtml +
       "</div>" +
       progressHtml +
+      importHtml +
+      lastErrorHtml +
       errorsHtml +
       kinoxCaptchaHtml +
       "</div>";
@@ -444,6 +523,47 @@ async function retryQueueItem(id) {
     loadQueue();
   } catch (e) {
     /* ignore */
+  }
+}
+
+async function pauseQueueItem(id) {
+  await queueAction(id, "pause", "Paused");
+}
+
+async function resumeQueueItem(id) {
+  await queueAction(id, "resume", "Resumed");
+}
+
+async function queueAction(id, action, successMessage) {
+  try {
+    const resp = await fetch("/api/queue/" + id + "/" + action, {
+      method: "POST",
+    });
+    const data = await resp.json();
+    if (typeof showToast === "function") {
+      showToast(data.error || successMessage);
+    }
+    loadQueue();
+  } catch (e) {
+    /* ignore */
+  }
+}
+
+async function triggerScan(service) {
+  try {
+    const resp = await fetch("/api/" + service + "/scan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    const data = await resp.json();
+    if (typeof showToast === "function") {
+      showToast(
+        data.error || service.charAt(0).toUpperCase() + service.slice(1) + " scan triggered",
+      );
+    }
+  } catch (e) {
+    if (typeof showToast === "function") showToast("Scan request failed");
   }
 }
 

@@ -355,6 +355,98 @@ async function saveDownloadPath() {
 
 loadSettings();
 refreshPublicIp();
+loadIntegrationStatus();
+loadLogs();
+
+// ---------------------------------------------------------------------------
+// Media server integrations
+// ---------------------------------------------------------------------------
+
+async function loadIntegrationStatus() {
+  const container = document.getElementById("integrationStatus");
+  if (!container) return;
+
+  let integrations;
+  try {
+    const resp = await fetch("/api/status");
+    const data = await resp.json();
+    integrations = data.integrations;
+  } catch (e) {
+    container.innerHTML =
+      '<div class="settings-hint">Could not read the service status.</div>';
+    return;
+  }
+
+  // /api/status only includes integrations for an authenticated caller, so an
+  // absent key is a permissions answer, not a "nothing is configured" one.
+  if (!integrations) {
+    container.innerHTML =
+      '<div class="settings-hint">Sign in as an admin to see integration status.</div>';
+    return;
+  }
+
+  const rows = ["sonarr", "radarr", "jellyfin"].map((name) => {
+    const info = integrations[name] || {};
+    let state = "";
+    let detail = "";
+
+    if (!info.configured) {
+      detail = "Not configured";
+    } else if (info.reachable) {
+      state = "ok";
+      detail =
+        "Connected" +
+        (info.version ? " — v" + esc(info.version) : "") +
+        (info.server_name ? " (" + esc(info.server_name) + ")" : "") +
+        (info.instance_name ? " (" + esc(info.instance_name) + ")" : "");
+    } else {
+      state = "error";
+      detail = "Unreachable" + (info.error ? " — " + esc(info.error) : "");
+    }
+
+    return (
+      '<div class="integration-status">' +
+      '<span class="integration-dot ' + state + '"></span>' +
+      '<span class="integration-name">' +
+      name.charAt(0).toUpperCase() + name.slice(1) +
+      "</span>" +
+      '<span class="integration-detail">' + detail + "</span>" +
+      "</div>"
+    );
+  });
+
+  container.innerHTML = rows.join("");
+}
+
+// ---------------------------------------------------------------------------
+// Log tail
+// ---------------------------------------------------------------------------
+
+async function loadLogs() {
+  const panel = document.getElementById("logPanel");
+  if (!panel) return;
+  const pathLabel = document.getElementById("logPath");
+
+  try {
+    const resp = await fetch("/api/logs?lines=300");
+    const data = await resp.json();
+    if (data.error) {
+      panel.innerHTML = '<span class="log-panel-empty">' + esc(data.error) + "</span>";
+      return;
+    }
+    if (pathLabel) pathLabel.textContent = data.path || "";
+    if (!data.lines || !data.lines.length) {
+      panel.innerHTML = '<span class="log-panel-empty">Log file is empty.</span>';
+      return;
+    }
+    panel.textContent = data.lines.join("\n");
+    // Newest lines are the interesting ones.
+    panel.scrollTop = panel.scrollHeight;
+  } catch (e) {
+    panel.innerHTML =
+      '<span class="log-panel-empty">Could not read the log file.</span>';
+  }
+}
 
 async function refreshPublicIp() {
   if (!publicIpValue || !publicIpMeta || !refreshPublicIpBtn) return;

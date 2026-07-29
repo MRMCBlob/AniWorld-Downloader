@@ -308,6 +308,41 @@ endblock %} {% block content %}
       container is using the expected public IP.
     </div>
   </div>
+
+  <div class="settings-section">
+    <h2 data-i18n="settings.integrations">Media Server Integrations</h2>
+    <h3 class="settings-subtitle" data-i18n="settings.integrations_status">
+      Connection Status
+    </h3>
+    <div id="integrationStatus">
+      <div class="settings-hint">Checking...</div>
+    </div>
+    <div class="settings-hint" data-i18n="settings.integrations_hint">
+      Configured through environment variables (SONARR_URL, SONARR_API_KEY, and
+      the Radarr/Jellyfin equivalents) so API keys never reach the database or
+      the browser. Restart the container after changing them.
+    </div>
+    <div class="add-user-row" style="margin-top: 12px">
+      <button type="button" onclick="triggerScan('sonarr')">Scan Sonarr</button>
+      <button type="button" onclick="triggerScan('radarr')">Scan Radarr</button>
+      <button type="button" onclick="triggerScan('jellyfin')">
+        Scan Jellyfin
+      </button>
+    </div>
+  </div>
+
+  <div class="settings-section">
+    <h2 data-i18n="settings.logs">Logs</h2>
+    <div class="add-user-row" style="margin-bottom: 12px">
+      <button type="button" onclick="loadLogs()" data-i18n="settings.logs_refresh">
+        Refresh
+      </button>
+      <span class="settings-hint" id="logPath"></span>
+    </div>
+    <div class="log-panel" id="logPanel">
+      <span class="log-panel-empty">Loading...</span>
+    </div>
+  </div>
 </div>
 {% endblock %} {% block scripts %}
 <script src="{{ url_for('static', filename='settings.js') }}?v={{ app_version }}"></script>
