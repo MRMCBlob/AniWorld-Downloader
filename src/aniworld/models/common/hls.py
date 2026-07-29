@@ -450,6 +450,7 @@ def _download_playlist(playlist_url, headers, temp_prefix, suffix, tracker_facto
 
         if concurrency == 1:
             for segment in segments:
+                _check_abort()
                 chunk = _fetch_segment(segment)
                 handle.write(chunk)
                 tracker.advance(len(chunk))
@@ -467,6 +468,7 @@ def _download_playlist(playlist_url, headers, temp_prefix, suffix, tracker_facto
                 next_index += 1
 
             while pending:
+                _check_abort()
                 chunk = pending.popleft().result()
                 handle.write(chunk)
                 tracker.advance(len(chunk))
@@ -475,6 +477,18 @@ def _download_playlist(playlist_url, headers, temp_prefix, suffix, tracker_facto
                     next_index += 1
 
     return output_path
+
+
+def _check_abort():
+    """Stop between segments when a supervisor asked this download to end.
+
+    A hoster that serves a very long playlist very slowly stays under the
+    per-segment timeout forever, so the only way out is to check in.
+    """
+    from .common import DownloadAborted, abort_requested
+
+    if abort_requested():
+        raise DownloadAborted("download aborted by supervisor")
 
 
 def download_hls_parallel(

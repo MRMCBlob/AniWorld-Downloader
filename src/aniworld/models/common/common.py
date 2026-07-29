@@ -332,6 +332,61 @@ def get_ffmpeg_progress():
         return dict(_ffmpeg_progress)
 
 
+# --------------------------------------------------------------------------- #
+# Abort registry
+# --------------------------------------------------------------------------- #
+#
+# FFmpeg already kills itself after a minute without progress, but a download
+# can also wedge outside FFmpeg — in a hoster's HLS playlist, in a captcha, in a
+# socket that never returns. An unattended service cannot afford to lose its
+# only worker to one of those, so a supervisor may ask a job to stop and the
+# long-running loops below check in.
+#
+# Keyed by queue id so it stays correct if more than one download ever runs at
+# a time; the current job is published in a thread-local by the caller that
+# starts the download.
+
+_aborts = set()
+_aborts_lock = threading.Lock()
+_current_job = threading.local()
+
+
+class DownloadAborted(RuntimeError):
+    """Raised inside a download when a supervisor asked it to stop."""
+
+
+def set_current_job(job_id):
+    """Mark this thread as running ``job_id`` (None to clear)."""
+    _current_job.job_id = job_id
+
+
+def get_current_job():
+    return getattr(_current_job, "job_id", None)
+
+
+def request_abort(job_id):
+    if job_id is None:
+        return
+    with _aborts_lock:
+        _aborts.add(job_id)
+
+
+def clear_abort(job_id):
+    if job_id is None:
+        return
+    with _aborts_lock:
+        _aborts.discard(job_id)
+
+
+def abort_requested(job_id=None):
+    if job_id is None:
+        job_id = get_current_job()
+    if job_id is None:
+        return False
+    with _aborts_lock:
+        return job_id in _aborts
+
+
 def _parse_ffmpeg_time(time_str):
     """Parse ffmpeg time string (HH:MM:SS.xx) to seconds."""
     try:
@@ -425,6 +480,7 @@ def _run_ffmpeg_with_progress(node, overwrite_output=True, label=""):
     last_size_ts = None
     last_change = time.monotonic()
     total_duration = 0.0
+    aborted = False
 
     with _ffmpeg_progress_lock:
         _ffmpeg_progress.update(
@@ -436,7 +492,12 @@ def _run_ffmpeg_with_progress(node, overwrite_output=True, label=""):
             try:
                 line_str = line_queue.get(timeout=1.0)
             except queue.Empty:
-                # No new line within 1 s – just check the stall timer
+                # No new line within 1 s – check the abort flag and stall timer
+                if abort_requested():
+                    logger.warning("[FFmpeg] Abort requested. Killing process.")
+                    process.kill()
+                    aborted = True
+                    break
                 if time.monotonic() - last_change > STALL_TIMEOUT:
                     logger.warning(
                         "[FFmpeg] Stall detected – no progress for "
@@ -525,6 +586,12 @@ def _run_ffmpeg_with_progress(node, overwrite_output=True, label=""):
                     process.kill()
                     break
 
+                if abort_requested():
+                    logger.warning("[FFmpeg] Abort requested. Killing process.")
+                    process.kill()
+                    aborted = True
+                    break
+
                 try:
                     from ...web.db import is_queue_force_cancelled
                     from ...playwright.captcha import _local
@@ -573,6 +640,11 @@ def _run_ffmpeg_with_progress(node, overwrite_output=True, label=""):
 
     reader_thread.join(timeout=5)
     process.wait()
+    if aborted:
+        # Distinct from a plain ffmpeg failure so the caller can tell "we
+        # stopped this on purpose" from "the hoster served us garbage", and
+        # skip the provider-fallback retries that would follow the latter.
+        raise DownloadAborted("download aborted by supervisor")
     if process.returncode != 0:
         detail = (
             "\n".join(stderr_lines[-20:])
@@ -1283,6 +1355,18 @@ def download(self):
                 return
 
             except KeyboardInterrupt:
+                _cleanup_episode_download(self)
+                _remove_empty_dirs(
+                    self._folder_path,
+                    self._base_folder,
+                    protected=getattr(self, "selected_path", None),
+                )
+                raise
+
+            except DownloadAborted:
+                # A supervisor stopped this on purpose. Cycling through the
+                # remaining providers would ignore that and keep the worker
+                # busy for another few minutes.
                 _cleanup_episode_download(self)
                 _remove_empty_dirs(
                     self._folder_path,

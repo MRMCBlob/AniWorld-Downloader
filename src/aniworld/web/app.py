@@ -16,9 +16,11 @@ from ..config import (
     get_provider_fallback_order,
     parse_provider_order,
 )
+from .. import events, postprocess
 from ..extractors import provider_functions
 from ..extractors.provider.hanime_tv import fetch_hanime_trending, search_hanime
 from ..logger import get_logger
+from ..models.common import common as _common
 from ..models.mangafire_to.series import search_series as query_mangafire
 from ..providers import resolve_provider
 from ..search import (
@@ -72,11 +74,18 @@ from .db import (
     is_queue_cancelled,
     is_series_queued_or_running,
     move_queue_item,
+    pause_queue_item,
     remove_autosync_job,
     remove_custom_path,
     remove_from_queue,
     requeue_item,
+    resume_queue_item,
+    retry_backoff_seconds,
+    schedule_queue_retry,
     set_captcha_url,
+    set_queue_import_status,
+    set_queue_media_type,
+    set_queue_priority,
     set_queue_status,
     update_autosync_job,
     update_queue_errors,
@@ -464,6 +473,71 @@ def _fetch_public_ip():
     raise RuntimeError(last_error or "Failed to resolve public IP")
 
 
+def _stall_timeout():
+    """Seconds of no progress before a download is abandoned. 0 disables it."""
+    try:
+        return max(0, int(os.environ.get("ANIWORLD_STALL_TIMEOUT", "") or 900))
+    except ValueError:
+        return 900
+
+
+class _StallWatchdog:
+    """Abort a download that stopped making progress.
+
+    FFmpeg polices itself, but a download can also wedge somewhere FFmpeg never
+    sees: a hoster dribbling out HLS segments, a captcha nobody solves, a socket
+    that never returns. In an unattended service that silently costs the only
+    worker, and every item behind it, indefinitely.
+
+    Progress is whatever the download reports through the shared ffmpeg/HLS
+    counters. When it stops changing for long enough, the job is flagged in the
+    abort registry and the long-running loops in the core notice and unwind.
+    """
+
+    POLL_INTERVAL = 5
+
+    def __init__(self, queue_id, timeout):
+        self.queue_id = queue_id
+        self.timeout = timeout
+        self._stop = threading.Event()
+        self._thread = None
+        self.tripped = False
+
+    def __enter__(self):
+        if self.timeout > 0:
+            self._thread = threading.Thread(target=self._run, daemon=True)
+            self._thread.start()
+        return self
+
+    def __exit__(self, *exc_info):
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=self.POLL_INTERVAL + 1)
+        _common.clear_abort(self.queue_id)
+        return False
+
+    def _run(self):
+        from ..models.common.common import get_ffmpeg_progress
+
+        last_seen = None
+        last_change = time.monotonic()
+        while not self._stop.wait(self.POLL_INTERVAL):
+            snapshot = get_ffmpeg_progress()
+            marker = (snapshot.get("percent"), snapshot.get("time"))
+            if marker != last_seen:
+                last_seen = marker
+                last_change = time.monotonic()
+                continue
+            if time.monotonic() - last_change > self.timeout:
+                logger.warning(
+                    f"Queue item {self.queue_id}: no progress for {self.timeout}s, "
+                    "aborting the download so the queue can move on."
+                )
+                self.tripped = True
+                _common.request_abort(self.queue_id)
+                return
+
+
 def _queue_worker():
     """Single global worker that processes one download at a time."""
     while True:
@@ -474,10 +548,11 @@ def _queue_worker():
                     item = get_next_queued()
                     if item:
                         try:
-                            set_queue_status(item["id"], "running")
+                            set_queue_status(item["id"], "downloading")
                         except Exception as e:
                             logger.error(
-                                f"Failed to set status to 'running': {e}", exc_info=True
+                                f"Failed to set status to 'downloading': {e}",
+                                exc_info=True,
                             )
                             item = None
 
@@ -536,6 +611,9 @@ def _queue_worker():
 
             from ..playwright import captcha as _captcha_mod
 
+            imported_count = 0
+            aborted = False
+
             for i, ep_url in enumerate(episodes):
                 try:
                     selected_pages = None
@@ -574,14 +652,32 @@ def _queue_worker():
                         ep_kwargs["selected_path"] = selected_path
                     episode = prov.episode_cls(**ep_kwargs)
                     _captcha_mod._local.queue_id = item["id"]
+                    _common.set_current_job(item["id"])
+                    _emit_download_started(item, chapter_url)
                     try:
-                        episode.download()
+                        with _StallWatchdog(item["id"], _stall_timeout()) as watchdog:
+                            episode.download()
+                        if watchdog.tripped:
+                            raise TimeoutError(
+                                f"no progress for {_stall_timeout()}s; aborted"
+                            )
+                        if _run_postprocess(item, episode):
+                            imported_count += 1
                     finally:
                         _captcha_mod._local.queue_id = None
+                        _common.set_current_job(None)
                 except Exception as e:
                     _captcha_mod._local.queue_id = None
+                    _common.set_current_job(None)
                     logger.error(f"Download failed for {ep_url}: {e}")
                     err_entry = {"url": ep_url, "error": str(e)}
+                    events.emit(
+                        events.DOWNLOAD_FAILED,
+                        title=item.get("title"),
+                        path=str(chapter_url),
+                        queue_id=item["id"],
+                        error=str(e)[:500],
+                    )
                     # kinox (and only kinox) guards each download with a captcha
                     # every visitor gets. Attach the kinox title page so the UI
                     # can offer a "solve on kinox, then retry" button.
@@ -618,23 +714,124 @@ def _queue_worker():
             # Only set final status if not already cancelled
             if not is_queue_cancelled(item["id"]):
                 update_queue_progress(item["id"], len(episodes), "")
-                status = (
-                    "failed" if errors and len(errors) == len(episodes) else "completed"
-                )
-                set_queue_status(item["id"], status)
-
-                # Notify the Discord requester (DM) + optional announce channel.
-                if status == "completed" and item.get("source") == "discord":
-                    _notify_discord_completed(item)
+                _finish_queue_item(item, episodes, errors, imported_count)
 
         except Exception as e:
             logger.error(f"Queue worker error: {e}", exc_info=True)
             if item:
                 try:
-                    set_queue_status(item["id"], "failed")
+                    set_queue_status(item["id"], "failed", last_error=str(e))
                 except Exception:
                     pass
             time.sleep(3)
+
+
+def _finish_queue_item(item, episodes, errors, imported_count):
+    """Decide what a finished pass over an item means, and record it.
+
+    Everything failing gets a retry with exponential backoff rather than an
+    immediate 'failed': the usual cause is a hoster having a bad minute, and an
+    unattended service should ride that out on its own. A partial success is
+    not retried, because re-running it would redownload the episodes that
+    already worked.
+    """
+    all_failed = bool(errors) and len(errors) == len(episodes)
+    last_error = errors[-1].get("error") if errors else None
+
+    if all_failed:
+        delay = retry_backoff_seconds((item.get("attempts") or 0) + 1)
+        if schedule_queue_retry(item["id"], delay, error=last_error):
+            logger.warning(
+                f"Queue item {item['id']} ({item.get('title')}) failed; "
+                f"retrying in {delay}s"
+            )
+            return
+        set_queue_status(item["id"], "failed", last_error=last_error)
+        return
+
+    if imported_count and imported_count == len(episodes):
+        status = "imported"
+    else:
+        status = "completed"
+    set_queue_status(item["id"], status, last_error=last_error)
+
+    # Notify the Discord requester (DM) + optional announce channel.
+    if item.get("source") == "discord":
+        _notify_discord_completed(item)
+
+
+def _register_webhook_subscriber():
+    """Wire the webhook dispatcher onto the event bus, if any URL is configured."""
+    try:
+        from ..integrations import webhooks
+
+        if not webhooks.enabled():
+            return
+        events.subscribe(webhooks.on_event)
+        webhooks.start_dispatcher()
+    except Exception as exc:
+        logger.warning(f"Could not start the webhook dispatcher: {exc}")
+
+
+def _emit_download_started(item, url):
+    events.emit(
+        events.DOWNLOAD_STARTED,
+        type=item.get("media_type"),
+        title=item.get("title"),
+        path=str(url),
+        queue_id=item["id"],
+    )
+
+
+def _run_postprocess(item, episode):
+    """Verify, stage and import one finished episode. Returns True if imported.
+
+    Post-processing problems are recorded but never raised: the download itself
+    succeeded, and turning a good file into a failed queue item would only make
+    the retry logic download it all over again.
+    """
+    queue_id = item["id"]
+
+    def on_stage(name):
+        if name == "verifying":
+            set_queue_status(queue_id, "verifying")
+
+    try:
+        result = postprocess.finalize(
+            episode,
+            queue_id=queue_id,
+            media_type_override=item.get("media_type"),
+            on_stage=on_stage,
+        )
+    except Exception as exc:
+        logger.error(f"Post-processing failed for queue item {queue_id}: {exc}",
+                     exc_info=True)
+        return False
+    finally:
+        # Back to 'downloading' for the next episode of this item; the final
+        # status is decided once the whole item is done.
+        if not is_queue_cancelled(queue_id):
+            set_queue_status(queue_id, "downloading")
+
+    if result.media_type:
+        set_queue_media_type(queue_id, result.media_type)
+
+    if not result.ok:
+        # A file that failed verification is a failed download, so surface it
+        # through the same error channel the download itself uses.
+        raise RuntimeError(result.error or "post-processing failed")
+
+    import_detail = (result.details.get("import") or {})
+    set_queue_import_status(
+        queue_id,
+        "imported" if result.imported else (import_detail.get("reason") or "pending"),
+    )
+    if not result.imported:
+        logger.info(
+            f"Queue item {queue_id}: {result.path} stayed in the completed folder "
+            f"({import_detail.get('reason')}: {import_detail.get('detail')})"
+        )
+    return result.imported
 
 
 def _ensure_queue_worker():
@@ -648,13 +845,20 @@ def _ensure_queue_worker():
 
     conn = get_db()
     try:
+        # Anything the previous process was mid-way through is orphaned: hand
+        # it back to the queue so a restart resumes the work instead of leaving
+        # items stuck in an active state forever. The backoff is cleared too —
+        # a restart is not a failed attempt and should not be made to wait.
         conn.execute(
-            "UPDATE download_queue SET status = 'queued' WHERE status = 'running'"
+            "UPDATE download_queue SET status = 'queued', next_attempt_at = NULL "
+            "WHERE status IN ('downloading', 'verifying')"
         )
         conn.execute("UPDATE download_queue SET captcha_url = NULL")
         conn.commit()
     finally:
         conn.close()
+
+    _register_webhook_subscriber()
 
     thread = threading.Thread(target=_queue_worker, daemon=True)
     thread.start()

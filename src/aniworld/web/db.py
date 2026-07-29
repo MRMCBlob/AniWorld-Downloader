@@ -273,8 +273,33 @@ def update_user_role(user_id, new_role):
 
 # ===== Download Queue =====
 
-_CREATE_QUEUE_TABLE = """\
-CREATE TABLE IF NOT EXISTS download_queue (
+#: Every status a queue item can hold, mirrored by the CHECK constraint below.
+#:
+#: 'downloading' used to be called 'running'. The rename came with the extra
+#: states around importing, and is applied by the schema migration.
+QUEUE_STATUSES = (
+    "queued",
+    "downloading",
+    "verifying",
+    "completed",
+    "imported",
+    "failed",
+    "cancelled",
+    "paused",
+)
+
+#: Statuses meaning "the worker is on this item right now".
+ACTIVE_STATUSES = ("downloading", "verifying")
+
+#: Statuses meaning "this item is done, one way or another".
+TERMINAL_STATUSES = ("completed", "imported", "failed", "cancelled")
+
+#: Statuses that occupy a slot: either running, or waiting to run.
+PENDING_STATUSES = ("queued", "downloading", "verifying")
+
+_STATUS_CHECK = ",".join(f"'{status}'" for status in QUEUE_STATUSES)
+
+_QUEUE_COLUMNS = """\
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     title TEXT NOT NULL,
     series_url TEXT NOT NULL,
@@ -284,14 +309,89 @@ CREATE TABLE IF NOT EXISTS download_queue (
     provider TEXT NOT NULL,
     username TEXT,
     status TEXT NOT NULL DEFAULT 'queued'
-        CHECK(status IN ('queued','running','completed','failed','cancelled')),
+        CHECK(status IN ({statuses})),
     current_episode INTEGER NOT NULL DEFAULT 0,
     current_url TEXT,
     errors TEXT NOT NULL DEFAULT '[]',
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    completed_at TEXT
-);
-"""
+    completed_at TEXT,
+    position INTEGER NOT NULL DEFAULT 0,
+    custom_path_id INTEGER,
+    source TEXT NOT NULL DEFAULT 'manual',
+    captcha_url TEXT,
+    discord_user_id TEXT,
+    priority INTEGER NOT NULL DEFAULT 0,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    max_attempts INTEGER,
+    next_attempt_at TEXT,
+    last_error TEXT,
+    media_type TEXT,
+    import_status TEXT
+""".format(statuses=_STATUS_CHECK)
+
+_CREATE_QUEUE_TABLE = f"CREATE TABLE IF NOT EXISTS download_queue (\n{_QUEUE_COLUMNS}\n);"
+
+#: Columns of the current schema, in order, for the rebuild migration.
+_QUEUE_COLUMN_NAMES = tuple(
+    line.strip().split()[0]
+    for line in _QUEUE_COLUMNS.splitlines()
+    if line.strip() and not line.strip().startswith("CHECK(")
+)
+
+_ADDED_COLUMNS = (
+    # (name, DDL) — applied to databases that predate the column but already
+    # carry the current CHECK constraint.
+    ("position", "INTEGER NOT NULL DEFAULT 0"),
+    ("custom_path_id", "INTEGER"),
+    ("source", "TEXT NOT NULL DEFAULT 'manual'"),
+    ("captcha_url", "TEXT"),
+    ("discord_user_id", "TEXT"),
+    ("priority", "INTEGER NOT NULL DEFAULT 0"),
+    ("attempts", "INTEGER NOT NULL DEFAULT 0"),
+    ("max_attempts", "INTEGER"),
+    ("next_attempt_at", "TEXT"),
+    ("last_error", "TEXT"),
+    ("media_type", "TEXT"),
+    ("import_status", "TEXT"),
+)
+
+
+def _queue_column_names(conn):
+    return [row["name"] for row in conn.execute("PRAGMA table_info(download_queue)")]
+
+
+def _rebuild_queue_table(conn):
+    """Recreate download_queue with the current CHECK constraint.
+
+    SQLite cannot alter a CHECK constraint in place, and the constraint has to
+    change: it hard-coded the old status list, so a plain ALTER could add the
+    new columns but every write of 'verifying' or 'imported' would fail. The
+    table is therefore rebuilt with the documented rename-copy-drop dance.
+
+    Existing rows are carried over unchanged apart from 'running', which is
+    rewritten to 'downloading' during the copy — inserting it as-is would trip
+    the new constraint.
+    """
+    existing = _queue_column_names(conn)
+    if not existing:
+        return
+
+    shared = [name for name in _QUEUE_COLUMN_NAMES if name in existing]
+    select_terms = [
+        "CASE WHEN status = 'running' THEN 'downloading' ELSE status END"
+        if name == "status"
+        else name
+        for name in shared
+    ]
+    columns = ", ".join(shared)
+
+    conn.execute("ALTER TABLE download_queue RENAME TO download_queue_old")
+    conn.execute(f"CREATE TABLE download_queue (\n{_QUEUE_COLUMNS}\n);")
+    conn.execute(
+        f"INSERT INTO download_queue ({columns}) "
+        f"SELECT {', '.join(select_terms)} FROM download_queue_old"
+    )
+    conn.execute("DROP TABLE download_queue_old")
 
 
 def init_queue_db():
@@ -299,37 +399,31 @@ def init_queue_db():
     conn = get_db()
     try:
         conn.execute(_CREATE_QUEUE_TABLE)
-        # Add position column for queue reordering (migration for existing DBs)
-        try:
-            conn.execute(
-                "ALTER TABLE download_queue ADD COLUMN position INTEGER NOT NULL DEFAULT 0"
-            )
-            # Backfill: set position = id for existing rows
-            conn.execute("UPDATE download_queue SET position = id WHERE position = 0")
-        except Exception:
-            pass  # column already exists
-        # Add custom_path_id column (migration for existing DBs)
-        try:
-            conn.execute("ALTER TABLE download_queue ADD COLUMN custom_path_id INTEGER")
-        except Exception:
-            pass  # column already exists
-        # Add source column (migration for existing DBs) - marks origin: 'manual' or 'sync'
-        try:
-            conn.execute(
-                "ALTER TABLE download_queue ADD COLUMN source TEXT NOT NULL DEFAULT 'manual'"
-            )
-        except Exception:
-            pass  # column already exists
-        # Add captcha_url column (migration for existing DBs)
-        try:
-            conn.execute("ALTER TABLE download_queue ADD COLUMN captcha_url TEXT")
-        except Exception:
-            pass  # column already exists
-        # Add discord_user_id column so the bot can DM the requester on completion
-        try:
-            conn.execute("ALTER TABLE download_queue ADD COLUMN discord_user_id TEXT")
-        except Exception:
-            pass  # column already exists
+
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'download_queue'"
+        ).fetchone()
+        schema = (row["sql"] if row else "") or ""
+
+        if "'downloading'" not in schema:
+            # Pre-rename database: the CHECK constraint still lists 'running'
+            # and knows nothing about verifying/imported/paused.
+            _rebuild_queue_table(conn)
+        else:
+            existing = set(_queue_column_names(conn))
+            for name, ddl in _ADDED_COLUMNS:
+                if name in existing:
+                    continue
+                conn.execute(f"ALTER TABLE download_queue ADD COLUMN {name} {ddl}")
+                if name == "position":
+                    conn.execute(
+                        "UPDATE download_queue SET position = id WHERE position = 0"
+                    )
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_queue_status_ready "
+            "ON download_queue (status, priority DESC, position, id)"
+        )
         conn.commit()
     finally:
         conn.close()
@@ -345,14 +439,19 @@ def add_to_queue(
     custom_path_id=None,
     source="manual",
     discord_user_id=None,
+    priority=0,
+    media_type=None,
+    max_attempts=None,
 ):
     import json
 
     conn = get_db()
     try:
         cur = conn.execute(
-            "INSERT INTO download_queue (title, series_url, episodes, total_episodes, language, provider, username, custom_path_id, source, discord_user_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO download_queue (title, series_url, episodes, total_episodes, "
+            "language, provider, username, custom_path_id, source, discord_user_id, "
+            "priority, media_type, max_attempts) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 title,
                 series_url,
@@ -364,6 +463,9 @@ def add_to_queue(
                 custom_path_id,
                 source,
                 discord_user_id,
+                int(priority or 0),
+                media_type,
+                max_attempts,
             ),
         )
         row_id = cur.lastrowid
@@ -380,11 +482,12 @@ def is_series_queued_or_running(series_url, language=None):
     """Check if a series already has a queued or running item in the download queue."""
     conn = get_db()
     try:
+        placeholders = ",".join("?" for _ in PENDING_STATUSES)
         query = (
             "SELECT COUNT(*) AS cnt FROM download_queue "
-            "WHERE series_url = ? AND status IN ('queued', 'running')"
+            f"WHERE series_url = ? AND status IN ({placeholders})"
         )
-        params = [series_url]
+        params = [series_url, *PENDING_STATUSES]
         if language:
             query += " AND language = ?"
             params.append(language)
@@ -399,7 +502,8 @@ def get_queue():
     conn = get_db()
     try:
         rows = conn.execute(
-            "SELECT * FROM download_queue ORDER BY position ASC, id ASC"
+            "SELECT * FROM download_queue "
+            "ORDER BY priority DESC, position ASC, id ASC"
         ).fetchall()
         return [dict(r) for r in rows]
     finally:
@@ -407,13 +511,156 @@ def get_queue():
 
 
 def get_next_queued():
+    """The next item the worker should pick up, or None.
+
+    Priority beats manual ordering; ``position`` still decides within a
+    priority band. Items sitting out a retry backoff are skipped until their
+    ``next_attempt_at`` has passed, so one repeatedly failing download cannot
+    monopolise the worker by being retried in a tight loop.
+    """
     conn = get_db()
     try:
         row = conn.execute(
             "SELECT * FROM download_queue WHERE status = 'queued' "
-            "ORDER BY position ASC, id ASC LIMIT 1"
+            "AND (next_attempt_at IS NULL OR next_attempt_at <= datetime('now')) "
+            "ORDER BY priority DESC, position ASC, id ASC LIMIT 1"
         ).fetchone()
         return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def set_queue_priority(queue_id, priority):
+    conn = get_db()
+    try:
+        cur = conn.execute(
+            "UPDATE download_queue SET priority = ? WHERE id = ?",
+            (int(priority), queue_id),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def pause_queue_item(queue_id):
+    """Hold a queued item back without losing its place or its retry counter."""
+    conn = get_db()
+    try:
+        cur = conn.execute(
+            "UPDATE download_queue SET status = 'paused' WHERE id = ? AND status = 'queued'",
+            (queue_id,),
+        )
+        conn.commit()
+        if cur.rowcount > 0:
+            return True, None
+        return False, "Can only pause queued items"
+    finally:
+        conn.close()
+
+
+def resume_queue_item(queue_id):
+    """Release a paused item, clearing any leftover backoff so it runs at once."""
+    conn = get_db()
+    try:
+        cur = conn.execute(
+            "UPDATE download_queue SET status = 'queued', next_attempt_at = NULL "
+            "WHERE id = ? AND status = 'paused'",
+            (queue_id,),
+        )
+        conn.commit()
+        if cur.rowcount > 0:
+            return True, None
+        return False, "Item is not paused"
+    finally:
+        conn.close()
+
+
+def schedule_queue_retry(queue_id, delay_seconds, error=None):
+    """Put a failed item back in the queue after a delay.
+
+    Returns True when a retry was scheduled, False when the item has used up
+    its attempts and should be marked failed by the caller.
+    """
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT attempts, max_attempts FROM download_queue WHERE id = ?",
+            (queue_id,),
+        ).fetchone()
+        if not row:
+            return False
+
+        attempts = (row["attempts"] or 0) + 1
+        max_attempts = row["max_attempts"] or default_max_attempts()
+        if attempts >= max_attempts:
+            conn.execute(
+                "UPDATE download_queue SET attempts = ?, last_error = ? WHERE id = ?",
+                (attempts, _truncate_error(error), queue_id),
+            )
+            conn.commit()
+            return False
+
+        conn.execute(
+            "UPDATE download_queue SET status = 'queued', attempts = ?, "
+            "last_error = ?, current_url = NULL, captcha_url = NULL, "
+            "completed_at = NULL, "
+            "next_attempt_at = datetime('now', ?) WHERE id = ?",
+            (
+                attempts,
+                _truncate_error(error),
+                f"+{int(delay_seconds)} seconds",
+                queue_id,
+            ),
+        )
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+def default_max_attempts():
+    try:
+        return max(1, int(os.getenv("ANIWORLD_MAX_RETRIES", "") or 3))
+    except ValueError:
+        return 3
+
+
+def retry_backoff_seconds(attempts):
+    """Exponential backoff for retry number ``attempts``, capped at an hour."""
+    try:
+        base = max(1, int(os.getenv("ANIWORLD_RETRY_BACKOFF_BASE", "") or 60))
+    except ValueError:
+        base = 60
+    return min(base * (2 ** max(0, attempts - 1)), 3600)
+
+
+def _truncate_error(error):
+    if not error:
+        return None
+    return " ".join(str(error).split())[:500]
+
+
+def set_queue_media_type(queue_id, media_type):
+    conn = get_db()
+    try:
+        conn.execute(
+            "UPDATE download_queue SET media_type = ? WHERE id = ?",
+            (media_type, queue_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def set_queue_import_status(queue_id, import_status):
+    conn = get_db()
+    try:
+        conn.execute(
+            "UPDATE download_queue SET import_status = ? WHERE id = ?",
+            (import_status, queue_id),
+        )
+        conn.commit()
     finally:
         conn.close()
 
@@ -462,13 +709,32 @@ def move_queue_item(queue_id, direction):
         conn.close()
 
 
-def get_running():
+def get_running(limit=1):
+    """Items the worker currently holds. Post-processing counts as running."""
     conn = get_db()
     try:
+        placeholders = ",".join("?" for _ in ACTIVE_STATUSES)
+        rows = conn.execute(
+            f"SELECT * FROM download_queue WHERE status IN ({placeholders}) "
+            "ORDER BY id ASC LIMIT ?",
+            (*ACTIVE_STATUSES, limit),
+        ).fetchall()
+        if limit == 1:
+            return dict(rows[0]) if rows else None
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def count_running():
+    conn = get_db()
+    try:
+        placeholders = ",".join("?" for _ in ACTIVE_STATUSES)
         row = conn.execute(
-            "SELECT * FROM download_queue WHERE status = 'running' LIMIT 1"
+            f"SELECT COUNT(*) AS cnt FROM download_queue WHERE status IN ({placeholders})",
+            ACTIVE_STATUSES,
         ).fetchone()
-        return dict(row) if row else None
+        return row["cnt"] if row else 0
     finally:
         conn.close()
 
@@ -485,13 +751,14 @@ def update_queue_progress(queue_id, current_episode, current_url):
         conn.close()
 
 
-def set_queue_status(queue_id, status):
+def set_queue_status(queue_id, status, last_error=None):
     conn = get_db()
     try:
-        if status in ("completed", "failed"):
+        if status in TERMINAL_STATUSES:
             conn.execute(
-                "UPDATE download_queue SET status = ?, completed_at = datetime('now') WHERE id = ?",
-                (status, queue_id),
+                "UPDATE download_queue SET status = ?, last_error = ?, "
+                "completed_at = datetime('now') WHERE id = ?",
+                (status, _truncate_error(last_error), queue_id),
             )
         else:
             conn.execute(
@@ -530,10 +797,15 @@ def requeue_item(queue_id):
             "SELECT COALESCE(MAX(position), 0) + 1 AS pos FROM download_queue"
         ).fetchone()
         next_pos = row["pos"] if row else 0
+        # An explicit retry also clears the automatic retry state: someone
+        # asking for another attempt should not be turned away by an exhausted
+        # attempt counter or made to sit out a backoff window.
         cur = conn.execute(
             "UPDATE download_queue SET status='queued', errors='[]', "
             "current_episode=0, current_url=NULL, completed_at=NULL, "
-            "captcha_url=NULL, position=? WHERE id=? AND status IN ('failed','cancelled')",
+            "captcha_url=NULL, attempts=0, next_attempt_at=NULL, last_error=NULL, "
+            "import_status=NULL, position=? "
+            "WHERE id=? AND status IN ('failed','cancelled','completed','imported')",
             (next_pos, queue_id),
         )
         conn.commit()
@@ -599,7 +871,7 @@ def cancel_queue_item(queue_id):
         ).fetchone()
         if not row:
             return False, "Item not found"
-        if row["status"] != "running":
+        if row["status"] not in ACTIVE_STATUSES:
             return False, "Can only cancel running items"
         conn.execute(
             "UPDATE download_queue SET status = 'cancelled' WHERE id = ?",
@@ -1089,15 +1361,155 @@ def get_queue_stats():
             "SELECT status, COUNT(*) AS cnt FROM download_queue GROUP BY status"
         ).fetchall():
             by_status[row["status"]] = row["cnt"]
+        placeholders = ",".join("?" for _ in ACTIVE_STATUSES)
         running = conn.execute(
             "SELECT title, current_episode, total_episodes FROM download_queue "
-            "WHERE status = 'running' LIMIT 1"
+            f"WHERE status IN ({placeholders}) LIMIT 1",
+            ACTIVE_STATUSES,
         ).fetchone()
         return {
             "total": total,
             "by_status": by_status,
             "currently_running": dict(running) if running else None,
         }
+    finally:
+        conn.close()
+
+
+# ===== Webhook Outbox =====
+
+_CREATE_WEBHOOK_TABLE = """\
+CREATE TABLE IF NOT EXISTS webhook_outbox (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    url TEXT NOT NULL,
+    event TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT NOT NULL DEFAULT (datetime('now')),
+    last_error TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    delivered_at TEXT
+);
+"""
+
+
+def init_webhook_db():
+    ANIWORLD_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    conn = get_db()
+    try:
+        conn.execute(_CREATE_WEBHOOK_TABLE)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_webhook_due "
+            "ON webhook_outbox (delivered_at, next_attempt_at)"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def enqueue_webhook(url, event, payload):
+    """Store a delivery for later. Writing a row is all the event path does.
+
+    Persisting rather than sending inline means a restart mid-delivery does not
+    lose the event, and a webhook receiver that is slow or down cannot hold up
+    a download.
+    """
+    conn = get_db()
+    try:
+        cur = conn.execute(
+            "INSERT INTO webhook_outbox (url, event, payload) VALUES (?, ?, ?)",
+            (url, event, payload),
+        )
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def get_due_webhooks(limit=20):
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM webhook_outbox WHERE delivered_at IS NULL "
+            "AND next_attempt_at <= datetime('now') ORDER BY id ASC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def mark_webhook_delivered(webhook_id):
+    conn = get_db()
+    try:
+        conn.execute(
+            "UPDATE webhook_outbox SET delivered_at = datetime('now'), last_error = NULL "
+            "WHERE id = ?",
+            (webhook_id,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def mark_webhook_failed(webhook_id, error, delay_seconds, max_attempts=8):
+    """Record a failed delivery and schedule the retry.
+
+    After ``max_attempts`` the row is marked delivered so it stops being
+    retried; the error is kept so it is still visible why it never arrived.
+    """
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT attempts FROM webhook_outbox WHERE id = ?", (webhook_id,)
+        ).fetchone()
+        if not row:
+            return False
+        attempts = (row["attempts"] or 0) + 1
+        if attempts >= max_attempts:
+            conn.execute(
+                "UPDATE webhook_outbox SET attempts = ?, last_error = ?, "
+                "delivered_at = datetime('now') WHERE id = ?",
+                (attempts, _truncate_error(error), webhook_id),
+            )
+            conn.commit()
+            return False
+        conn.execute(
+            "UPDATE webhook_outbox SET attempts = ?, last_error = ?, "
+            "next_attempt_at = datetime('now', ?) WHERE id = ?",
+            (
+                attempts,
+                _truncate_error(error),
+                f"+{int(delay_seconds)} seconds",
+                webhook_id,
+            ),
+        )
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+def purge_delivered_webhooks(keep_days=7):
+    conn = get_db()
+    try:
+        conn.execute(
+            "DELETE FROM webhook_outbox WHERE delivered_at IS NOT NULL "
+            "AND delivered_at < datetime('now', ?)",
+            (f"-{int(keep_days)} days",),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_webhook_stats():
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) AS pending FROM webhook_outbox WHERE delivered_at IS NULL"
+        ).fetchone()
+        return {"pending": row["pending"] if row else 0}
     finally:
         conn.close()
 
