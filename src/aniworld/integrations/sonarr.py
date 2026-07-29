@@ -270,6 +270,9 @@ class SonarrClient(ServarrClient):
             "season": season,
             "command_id": command.get("id"),
             "rejections": [r.get("reason") for r in rejections if r.get("reason")],
+            # Where Sonarr put the file, in its namespace — used to scope the
+            # Jellyfin scan to the affected library instead of all of them.
+            "destination_path": series.get("path"),
         }
 
     def _reprocess(self, candidate, series_id, season, episode_ids):

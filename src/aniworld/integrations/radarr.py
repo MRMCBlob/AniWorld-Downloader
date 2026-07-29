@@ -212,6 +212,9 @@ class RadarrClient(ServarrClient):
             "movie_title": movie.get("title"),
             "command_id": command.get("id"),
             "rejections": [r.get("reason") for r in rejections if r.get("reason")],
+            # Where Radarr put the file, in its namespace — used to scope the
+            # Jellyfin scan to the affected library instead of all of them.
+            "destination_path": movie.get("path"),
         }
 
     def _reprocess(self, candidate, movie_id):
