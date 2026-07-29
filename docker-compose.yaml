@@ -5,41 +5,45 @@ services:
     # build: .
     ports:
       - "8080:8080"
+
     volumes:
-      # Persist downloads on the host so they survive container recreation.
-      - ./Downloads:/app/Downloads
-      # Persist application config and auth database across restarts.
-      - aniworld-data:/home/aniworld/.aniworld
+      # The whole storage mount. Downloads are staged under
+      # /media/downloads/aniworld; where the finished file finally lands is
+      # decided by the root folders configured in Sonarr and Radarr, so this
+      # container never creates library folders of its own.
+      - /media/jellyfin/storagebox:/media
 
-    # NOTE: Create ./Downloads before running: mkdir -p Downloads
-    # Docker creates missing bind-mount directories as root, causing permission errors.
+      # Config, queue database, logs and the Chromium profile.
+      #
+      # Deliberately a local volume rather than a folder on the storage box:
+      # SQLite over SSHFS/NFS has unreliable file locking, and the queue
+      # database is written continuously by a 24/7 service. Back it up to the
+      # box instead — see docs/DOCKER.md.
+      - aniworld-config:/config
 
-    # environment:
-    # --- General settings (uncomment the environment block to customise) ---
-    #   ANIWORLD_LANGUAGE: "German Dub"               # Default language (German Dub | English Sub | German Sub | English Dub)
-    #   ANIWORLD_PROVIDER: "VOE"                      # Default streaming provider
-    #   ANIWORLD_NAMING_TEMPLATE: "{title} ({year}) [imdbid-{imdbid}]/Season {season}/{title} S{season}E{episode}.mkv"
-    #   ANIWORLD_VIDEO_CODEC: "copy"                  # Video codec: copy | h264 | h265 | av1
-    #   ANIWORLD_LANG_SEPARATION: "0"                 # Separate downloads into language subfolders (german-dub/, english-sub/)
-    #   ANIWORLD_DISABLE_ENGLISH_SUB: "0"             # Block English Sub downloads entirely
-    #   ANIWORLD_DEBUG_MODE: "0"                      # Enable debug logging
-
-    # --- Authentication (uncomment the environment block to enable) ---
-    #   ANIWORLD_WEB_AUTH: "1"                        # Enable local username/password login
-    #   ANIWORLD_WEB_ADMIN_USER: ""                   # Auto-create admin on first run (skip setup page)
-    #   ANIWORLD_WEB_ADMIN_PASS: ""                   # Password for auto-created admin
-    #   ANIWORLD_WEB_SSO: "1"                         # Enable OIDC SSO login button
-    #   ANIWORLD_WEB_FORCE_SSO: "1"                   # SSO-only mode (no local accounts)
-    #   # OIDC / SSO provider settings (required when SSO is enabled)
-    #   ANIWORLD_OIDC_ISSUER_URL: "https://keycloak.example.com/realms/myrealm"
-    #   ANIWORLD_OIDC_CLIENT_ID: "aniworld"
-    #   ANIWORLD_OIDC_CLIENT_SECRET: "secret"
-    #   ANIWORLD_OIDC_DISPLAY_NAME: "SSO"             # Label shown on login button
-    #   ANIWORLD_OIDC_ADMIN_USER: ""                  # SSO username auto-promoted to admin
-    #   ANIWORLD_OIDC_ADMIN_SUBJECT: ""               # OIDC subject claim for auto-admin (preferred over username)
-    #   ANIWORLD_WEB_BASE_URL: "https://aniworld.example.com"  # External URL for redirects
+    env_file:
+      - .env
 
     restart: unless-stopped
 
+    # Give a running download time to finish its current ffmpeg mux instead of
+    # leaving a half-written file behind.
+    stop_grace_period: 60s
+
+    # SSHFS drops out from time to time; without this the container keeps
+    # serving a UI that cannot write anything.
+    healthcheck:
+      test: ["CMD", "python", "/usr/local/bin/healthcheck.py"]
+      interval: 30s
+      timeout: 15s
+      start_period: 120s
+      retries: 3
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
 volumes:
-  aniworld-data:
+  aniworld-config:

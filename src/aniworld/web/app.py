@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import shutil
 import threading
 import time
 
@@ -16,9 +17,11 @@ from ..config import (
     get_provider_fallback_order,
     parse_provider_order,
 )
+from .. import events, postprocess
 from ..extractors import provider_functions
 from ..extractors.provider.hanime_tv import fetch_hanime_trending, search_hanime
 from ..logger import get_logger
+from ..models.common import common as _common
 from ..models.mangafire_to.series import search_series as query_mangafire
 from ..providers import resolve_provider
 from ..search import (
@@ -69,14 +72,22 @@ from .db import (
     init_custom_paths_db,
     init_planned_db,
     init_queue_db,
+    init_webhook_db,
     is_queue_cancelled,
     is_series_queued_or_running,
     move_queue_item,
+    pause_queue_item,
     remove_autosync_job,
     remove_custom_path,
     remove_from_queue,
     requeue_item,
+    resume_queue_item,
+    retry_backoff_seconds,
+    schedule_queue_retry,
     set_captcha_url,
+    set_queue_import_status,
+    set_queue_media_type,
+    set_queue_priority,
     set_queue_status,
     update_autosync_job,
     update_queue_errors,
@@ -245,26 +256,27 @@ def _apply_discord_settings(payload, env_updates):
     return None
 
 
-def _persist_discord_env(env_updates):
-    """Persist only the Discord bot keys to the app's .env file.
+def _persist_settings_env(env_updates):
+    """Write web-UI settings through to the app's .env file.
 
-    Every other web-UI setting is intentionally in-memory only (see
-    api_settings_update). The bot config is the one exception: a token that
-    vanished on restart would be useless, so the ANIWORLD_DISCORD_* keys are
-    written through to the .env file. They live in .env.example too, so the
-    startup merge_env keeps them across restarts.
+    A 24/7 container gets restarted often, and settings that only lived in
+    os.environ were silently lost every time. Persisting them is safe with
+    respect to Docker: merge_env() loads the file with override=False, so a
+    value injected through compose/env_file always beats the stored one.
+
+    Only keys that also appear in .env.example survive, because merge_env
+    rebuilds the file from that template on every startup — so any new setting
+    must be added there as well.
     """
-    discord_keys = set(DISCORD_ENV_KEYS.values())
-    subset = {k: v for k, v in env_updates.items() if k in discord_keys}
-    if not subset:
+    if not env_updates:
         return
     try:
         from ..env import persist_env_values
 
         env_path = ANIWORLD_CONFIG_DIR / ".env"
-        persist_env_values(env_path, subset)
+        persist_env_values(env_path, env_updates)
     except Exception as exc:
-        logger.warning(f"Could not persist Discord settings to .env: {exc}")
+        logger.warning(f"Could not persist settings to .env: {exc}")
 
 
 def _notify_discord_completed(item):
@@ -413,6 +425,9 @@ def _fetch_htv_trending():
         return None
 
 
+# Process start, for the uptime reported by /api/status.
+_STARTED_AT = time.time()
+
 # Queue worker state
 _queue_worker_started = False
 _queue_lock = threading.Lock()
@@ -463,6 +478,71 @@ def _fetch_public_ip():
     raise RuntimeError(last_error or "Failed to resolve public IP")
 
 
+def _stall_timeout():
+    """Seconds of no progress before a download is abandoned. 0 disables it."""
+    try:
+        return max(0, int(os.environ.get("ANIWORLD_STALL_TIMEOUT", "") or 900))
+    except ValueError:
+        return 900
+
+
+class _StallWatchdog:
+    """Abort a download that stopped making progress.
+
+    FFmpeg polices itself, but a download can also wedge somewhere FFmpeg never
+    sees: a hoster dribbling out HLS segments, a captcha nobody solves, a socket
+    that never returns. In an unattended service that silently costs the only
+    worker, and every item behind it, indefinitely.
+
+    Progress is whatever the download reports through the shared ffmpeg/HLS
+    counters. When it stops changing for long enough, the job is flagged in the
+    abort registry and the long-running loops in the core notice and unwind.
+    """
+
+    POLL_INTERVAL = 5
+
+    def __init__(self, queue_id, timeout):
+        self.queue_id = queue_id
+        self.timeout = timeout
+        self._stop = threading.Event()
+        self._thread = None
+        self.tripped = False
+
+    def __enter__(self):
+        if self.timeout > 0:
+            self._thread = threading.Thread(target=self._run, daemon=True)
+            self._thread.start()
+        return self
+
+    def __exit__(self, *exc_info):
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=self.POLL_INTERVAL + 1)
+        _common.clear_abort(self.queue_id)
+        return False
+
+    def _run(self):
+        from ..models.common.common import get_ffmpeg_progress
+
+        last_seen = None
+        last_change = time.monotonic()
+        while not self._stop.wait(self.POLL_INTERVAL):
+            snapshot = get_ffmpeg_progress()
+            marker = (snapshot.get("percent"), snapshot.get("time"))
+            if marker != last_seen:
+                last_seen = marker
+                last_change = time.monotonic()
+                continue
+            if time.monotonic() - last_change > self.timeout:
+                logger.warning(
+                    f"Queue item {self.queue_id}: no progress for {self.timeout}s, "
+                    "aborting the download so the queue can move on."
+                )
+                self.tripped = True
+                _common.request_abort(self.queue_id)
+                return
+
+
 def _queue_worker():
     """Single global worker that processes one download at a time."""
     while True:
@@ -473,10 +553,11 @@ def _queue_worker():
                     item = get_next_queued()
                     if item:
                         try:
-                            set_queue_status(item["id"], "running")
+                            set_queue_status(item["id"], "downloading")
                         except Exception as e:
                             logger.error(
-                                f"Failed to set status to 'running': {e}", exc_info=True
+                                f"Failed to set status to 'downloading': {e}",
+                                exc_info=True,
                             )
                             item = None
 
@@ -535,6 +616,9 @@ def _queue_worker():
 
             from ..playwright import captcha as _captcha_mod
 
+            imported_count = 0
+            aborted = False
+
             for i, ep_url in enumerate(episodes):
                 try:
                     selected_pages = None
@@ -573,14 +657,32 @@ def _queue_worker():
                         ep_kwargs["selected_path"] = selected_path
                     episode = prov.episode_cls(**ep_kwargs)
                     _captcha_mod._local.queue_id = item["id"]
+                    _common.set_current_job(item["id"])
+                    _emit_download_started(item, chapter_url)
                     try:
-                        episode.download()
+                        with _StallWatchdog(item["id"], _stall_timeout()) as watchdog:
+                            episode.download()
+                        if watchdog.tripped:
+                            raise TimeoutError(
+                                f"no progress for {_stall_timeout()}s; aborted"
+                            )
+                        if _run_postprocess(item, episode):
+                            imported_count += 1
                     finally:
                         _captcha_mod._local.queue_id = None
+                        _common.set_current_job(None)
                 except Exception as e:
                     _captcha_mod._local.queue_id = None
+                    _common.set_current_job(None)
                     logger.error(f"Download failed for {ep_url}: {e}")
                     err_entry = {"url": ep_url, "error": str(e)}
+                    events.emit(
+                        events.DOWNLOAD_FAILED,
+                        title=item.get("title"),
+                        path=str(chapter_url),
+                        queue_id=item["id"],
+                        error=str(e)[:500],
+                    )
                     # kinox (and only kinox) guards each download with a captcha
                     # every visitor gets. Attach the kinox title page so the UI
                     # can offer a "solve on kinox, then retry" button.
@@ -617,23 +719,230 @@ def _queue_worker():
             # Only set final status if not already cancelled
             if not is_queue_cancelled(item["id"]):
                 update_queue_progress(item["id"], len(episodes), "")
-                status = (
-                    "failed" if errors and len(errors) == len(episodes) else "completed"
-                )
-                set_queue_status(item["id"], status)
-
-                # Notify the Discord requester (DM) + optional announce channel.
-                if status == "completed" and item.get("source") == "discord":
-                    _notify_discord_completed(item)
+                _finish_queue_item(item, episodes, errors, imported_count)
 
         except Exception as e:
             logger.error(f"Queue worker error: {e}", exc_info=True)
             if item:
                 try:
-                    set_queue_status(item["id"], "failed")
+                    set_queue_status(item["id"], "failed", last_error=str(e))
                 except Exception:
                     pass
             time.sleep(3)
+
+
+def _finish_queue_item(item, episodes, errors, imported_count):
+    """Decide what a finished pass over an item means, and record it.
+
+    Everything failing gets a retry with exponential backoff rather than an
+    immediate 'failed': the usual cause is a hoster having a bad minute, and an
+    unattended service should ride that out on its own. A partial success is
+    not retried, because re-running it would redownload the episodes that
+    already worked.
+    """
+    all_failed = bool(errors) and len(errors) == len(episodes)
+    last_error = errors[-1].get("error") if errors else None
+
+    if all_failed:
+        delay = retry_backoff_seconds((item.get("attempts") or 0) + 1)
+        if schedule_queue_retry(item["id"], delay, error=last_error):
+            logger.warning(
+                f"Queue item {item['id']} ({item.get('title')}) failed; "
+                f"retrying in {delay}s"
+            )
+            return
+        set_queue_status(item["id"], "failed", last_error=last_error)
+        return
+
+    if imported_count and imported_count == len(episodes):
+        status = "imported"
+    else:
+        status = "completed"
+    set_queue_status(item["id"], status, last_error=last_error)
+
+    # Notify the Discord requester (DM) + optional announce channel.
+    if item.get("source") == "discord":
+        _notify_discord_completed(item)
+
+
+def _queue_worker_alive():
+    """Whether the queue worker thread is still up.
+
+    A dead worker is the failure that matters most for an unattended service:
+    the UI keeps answering, downloads simply stop happening. Reporting it lets
+    the container healthcheck restart us instead of running silently broken.
+    """
+    if not _queue_worker_started:
+        return False
+    return any(
+        thread.name == "queue-worker" and thread.is_alive()
+        for thread in threading.enumerate()
+    )
+
+
+def _queue_summary():
+    try:
+        stats = get_queue_stats()
+    except Exception as exc:
+        return {"error": str(exc)[:120]}
+    by_status = stats.get("by_status") or {}
+    return {
+        "total": stats.get("total", 0),
+        "by_status": by_status,
+        "active": sum(by_status.get(status, 0) for status in ("downloading", "verifying")),
+        "current": stats.get("currently_running"),
+    }
+
+
+def _path_summary():
+    """Where files go, and how much room is left there."""
+    from pathlib import Path
+
+    from ..postprocess import completed_root
+
+    paths = {
+        "config": ANIWORLD_CONFIG_DIR,
+        "incomplete": os.environ.get("ANIWORLD_DOWNLOAD_PATH") or None,
+        "completed": completed_root(),
+    }
+    summary = {}
+    for name, value in paths.items():
+        if not value:
+            summary[name] = None
+            continue
+        path = Path(value).expanduser()
+        if not path.is_absolute():
+            # Relative download paths are resolved from home elsewhere in the
+            # app; report the same location the downloader will actually use.
+            path = Path.home() / path
+        entry = {"path": str(path), "exists": path.exists()}
+        if entry["exists"]:
+            try:
+                usage = shutil.disk_usage(path)
+                entry["free_bytes"] = usage.free
+                entry["total_bytes"] = usage.total
+            except OSError as exc:
+                entry["error"] = str(exc)[:120]
+        summary[name] = entry
+    return summary
+
+
+def _webhook_urls():
+    from ..integrations import webhooks
+
+    return webhooks.configured_urls()
+
+
+def _run_arr_scan(service, data):
+    """Refresh + rescan a series or movie, or the whole library."""
+    from ..integrations import IntegrationError, get_radarr, get_sonarr
+
+    client = get_sonarr() if service == "sonarr" else get_radarr()
+    if not client.configured:
+        return jsonify({"error": f"{service.title()} is not configured"}), 503
+
+    id_key = "series_id" if service == "sonarr" else "movie_id"
+    raw_id = data.get(id_key)
+    try:
+        target_id = int(raw_id) if raw_id not in (None, "") else None
+    except (TypeError, ValueError):
+        return jsonify({"error": f"{id_key} must be an integer"}), 400
+
+    try:
+        if service == "sonarr":
+            refresh = client.refresh_series(target_id)
+            rescan = client.rescan_series(target_id)
+        else:
+            refresh = client.refresh_movie(target_id)
+            rescan = client.rescan_movie(target_id)
+    except IntegrationError as exc:
+        return jsonify({"error": str(exc)[:300]}), 502
+    except Exception as exc:
+        logger.error(f"{service} scan failed: {exc}", exc_info=True)
+        return jsonify({"error": str(exc)[:300]}), 500
+
+    return jsonify(
+        {
+            "ok": True,
+            id_key: target_id,
+            "refresh": {"id": refresh.get("id"), "status": refresh.get("status")},
+            "rescan": {"id": rescan.get("id"), "status": rescan.get("status")},
+        }
+    )
+
+
+def _register_webhook_subscriber():
+    """Wire the webhook dispatcher onto the event bus, if any URL is configured."""
+    try:
+        from ..integrations import webhooks
+
+        if not webhooks.enabled():
+            return
+        events.subscribe(webhooks.on_event)
+        webhooks.start_dispatcher()
+    except Exception as exc:
+        logger.warning(f"Could not start the webhook dispatcher: {exc}")
+
+
+def _emit_download_started(item, url):
+    events.emit(
+        events.DOWNLOAD_STARTED,
+        type=item.get("media_type"),
+        title=item.get("title"),
+        path=str(url),
+        queue_id=item["id"],
+    )
+
+
+def _run_postprocess(item, episode):
+    """Verify, stage and import one finished episode. Returns True if imported.
+
+    Post-processing problems are recorded but never raised: the download itself
+    succeeded, and turning a good file into a failed queue item would only make
+    the retry logic download it all over again.
+    """
+    queue_id = item["id"]
+
+    def on_stage(name):
+        if name == "verifying":
+            set_queue_status(queue_id, "verifying")
+
+    try:
+        result = postprocess.finalize(
+            episode,
+            queue_id=queue_id,
+            media_type_override=item.get("media_type"),
+            on_stage=on_stage,
+        )
+    except Exception as exc:
+        logger.error(f"Post-processing failed for queue item {queue_id}: {exc}",
+                     exc_info=True)
+        return False
+    finally:
+        # Back to 'downloading' for the next episode of this item; the final
+        # status is decided once the whole item is done.
+        if not is_queue_cancelled(queue_id):
+            set_queue_status(queue_id, "downloading")
+
+    if result.media_type:
+        set_queue_media_type(queue_id, result.media_type)
+
+    if not result.ok:
+        # A file that failed verification is a failed download, so surface it
+        # through the same error channel the download itself uses.
+        raise RuntimeError(result.error or "post-processing failed")
+
+    import_detail = (result.details.get("import") or {})
+    set_queue_import_status(
+        queue_id,
+        "imported" if result.imported else (import_detail.get("reason") or "pending"),
+    )
+    if not result.imported:
+        logger.info(
+            f"Queue item {queue_id}: {result.path} stayed in the completed folder "
+            f"({import_detail.get('reason')}: {import_detail.get('detail')})"
+        )
+    return result.imported
 
 
 def _ensure_queue_worker():
@@ -647,15 +956,22 @@ def _ensure_queue_worker():
 
     conn = get_db()
     try:
+        # Anything the previous process was mid-way through is orphaned: hand
+        # it back to the queue so a restart resumes the work instead of leaving
+        # items stuck in an active state forever. The backoff is cleared too —
+        # a restart is not a failed attempt and should not be made to wait.
         conn.execute(
-            "UPDATE download_queue SET status = 'queued' WHERE status = 'running'"
+            "UPDATE download_queue SET status = 'queued', next_attempt_at = NULL "
+            "WHERE status IN ('downloading', 'verifying')"
         )
         conn.execute("UPDATE download_queue SET captcha_url = NULL")
         conn.commit()
     finally:
         conn.close()
 
-    thread = threading.Thread(target=_queue_worker, daemon=True)
+    _register_webhook_subscriber()
+
+    thread = threading.Thread(target=_queue_worker, name="queue-worker", daemon=True)
     thread.start()
 
 
@@ -1169,6 +1485,7 @@ def create_app(auth_enabled=False, sso_enabled=False, force_sso=False):
     init_custom_paths_db()
     init_autosync_db()
     init_planned_db()
+    init_webhook_db()
 
     # Wire up captcha hooks so the Playwright module can signal the Web UI
     from ..playwright import captcha as _captcha_mod
@@ -1867,6 +2184,15 @@ def create_app(auth_enabled=False, sso_enabled=False, force_sso=False):
 
         custom_path_id = data.get("custom_path_id")
 
+        media_type = (data.get("media_type") or "").strip().lower() or None
+        if media_type and media_type not in ("series", "movie"):
+            return jsonify({"error": "media_type must be 'series' or 'movie'"}), 400
+
+        try:
+            priority = int(data.get("priority") or 0)
+        except (TypeError, ValueError):
+            return jsonify({"error": "priority must be an integer"}), 400
+
         queue_id = add_to_queue(
             title,
             series_url,
@@ -1875,6 +2201,8 @@ def create_app(auth_enabled=False, sso_enabled=False, force_sso=False):
             provider,
             username,
             custom_path_id=custom_path_id,
+            priority=priority,
+            media_type=media_type,
         )
         return jsonify({"queue_id": queue_id})
 
@@ -1939,6 +2267,144 @@ def create_app(auth_enabled=False, sso_enabled=False, force_sso=False):
             return jsonify({"error": "item not found or not retryable"}), 400
         _ensure_queue_worker()
         return jsonify({"ok": True})
+
+    @app.route("/api/queue/<int:queue_id>/pause", methods=["POST"])
+    def api_queue_pause(queue_id):
+        ok, err = pause_queue_item(queue_id)
+        if not ok:
+            return jsonify({"error": err}), 400
+        return jsonify({"ok": True})
+
+    @app.route("/api/queue/<int:queue_id>/resume", methods=["POST"])
+    def api_queue_resume(queue_id):
+        ok, err = resume_queue_item(queue_id)
+        if not ok:
+            return jsonify({"error": err}), 400
+        _ensure_queue_worker()
+        return jsonify({"ok": True})
+
+    @app.route("/api/queue/<int:queue_id>/priority", methods=["POST"])
+    def api_queue_set_priority(queue_id):
+        data = request.get_json(silent=True) or {}
+        try:
+            priority = int(data.get("priority"))
+        except (TypeError, ValueError):
+            return jsonify({"error": "priority must be an integer"}), 400
+        if not set_queue_priority(queue_id, priority):
+            return jsonify({"error": "item not found"}), 404
+        return jsonify({"ok": True, "priority": priority})
+
+    # ── Flat aliases ──────────────────────────────────────────────────────────
+    # The documented integration surface is /api/<action>/<id>. These map onto
+    # the /api/queue/<id>/<action> routes the web UI already uses, so external
+    # callers get stable short paths without the UI having to change.
+
+    @app.route("/api/retry/<int:queue_id>", methods=["POST"])
+    def api_retry(queue_id):
+        return api_queue_retry(queue_id)
+
+    @app.route("/api/cancel/<int:queue_id>", methods=["POST"])
+    def api_cancel(queue_id):
+        return api_queue_cancel(queue_id)
+
+    @app.route("/api/pause/<int:queue_id>", methods=["POST"])
+    def api_pause(queue_id):
+        return api_queue_pause(queue_id)
+
+    @app.route("/api/resume/<int:queue_id>", methods=["POST"])
+    def api_resume(queue_id):
+        return api_queue_resume(queue_id)
+
+    # ── Status & integrations ─────────────────────────────────────────────────
+
+    @app.route("/api/status")
+    def api_status():
+        """Health and state summary. Also backs the container HEALTHCHECK.
+
+        Reachable without credentials so the healthcheck does not need the API
+        key baked into the image, but the unauthenticated view is deliberately
+        thin: version, worker liveness and queue counts. Anything that could
+        leak deployment details — paths, integration URLs and versions — is
+        only added for an authenticated caller.
+        """
+        from .api_auth import api_key_enabled, has_valid_api_key
+
+        payload = {
+            "status": "ok",
+            "version": app_version,
+            "uptime_seconds": round(time.time() - _STARTED_AT, 1),
+            "worker_running": _queue_worker_alive(),
+            "queue": _queue_summary(),
+        }
+
+        authenticated = (
+            not auth_enabled
+            or has_valid_api_key()
+            or (get_current_user() is not None if auth_enabled else False)
+        )
+        if not authenticated:
+            return jsonify(payload)
+
+        from ..integrations import integration_status
+
+        payload["integrations"] = integration_status()
+        payload["paths"] = _path_summary()
+        payload["api_key_required"] = api_key_enabled()
+        try:
+            from .db import get_webhook_stats
+
+            payload["webhooks"] = {
+                "configured": len(_webhook_urls()),
+                **get_webhook_stats(),
+            }
+        except Exception as exc:
+            payload["webhooks"] = {"error": str(exc)[:120]}
+        return jsonify(payload)
+
+    @app.route("/api/sonarr/scan", methods=["POST"])
+    def api_sonarr_scan():
+        data = request.get_json(silent=True) or {}
+        return _run_arr_scan("sonarr", data)
+
+    @app.route("/api/radarr/scan", methods=["POST"])
+    def api_radarr_scan():
+        data = request.get_json(silent=True) or {}
+        return _run_arr_scan("radarr", data)
+
+    @app.route("/api/jellyfin/scan", methods=["POST"])
+    def api_jellyfin_scan():
+        from ..integrations import get_jellyfin
+
+        data = request.get_json(silent=True) or {}
+        client = get_jellyfin()
+        if not client.configured:
+            return jsonify({"error": "Jellyfin is not configured"}), 503
+        try:
+            path = (data.get("path") or "").strip()
+            result = client.refresh_for_path(path) if path else client.refresh_all()
+        except Exception as exc:
+            return jsonify({"error": str(exc)[:300]}), 502
+        return jsonify({"ok": True, **result})
+
+    @app.route("/api/logs")
+    def api_logs():
+        """Tail the rotating log file, for the dashboard's log panel."""
+        from ..logger import get_log_file_path
+
+        try:
+            lines = max(1, min(int(request.args.get("lines", 200)), 2000))
+        except (TypeError, ValueError):
+            lines = 200
+
+        path = get_log_file_path()
+        if not path or not os.path.exists(path):
+            return jsonify({"path": None, "lines": []})
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as handle:
+                tail = handle.readlines()[-lines:]
+        except OSError as exc:
+            return jsonify({"error": str(exc)[:200]}), 500
+        return jsonify({"path": str(path), "lines": [line.rstrip() for line in tail]})
 
     # ── Captcha endpoints ─────────────────────────────────────────────────────
 
@@ -2377,15 +2843,14 @@ def create_app(auth_enabled=False, sso_enabled=False, force_sso=False):
             if error:
                 return jsonify({"error": error}), 400
 
-        # Settings are intentionally in-memory only for the running process.
-        # To persist across restarts, users set them in their .env file.
         for key, value in env_updates.items():
             os.environ[key] = value
 
+        # Apply to the running process first, then write through so the change
+        # survives a container restart.
+        _persist_settings_env(env_updates)
+
         if "discord" in data:
-            # The Discord bot config is the one setting that must survive a
-            # restart, so persist just those keys to .env (see the helper).
-            _persist_discord_env(env_updates)
             _reconcile_discord_bot()
 
         return jsonify({"ok": True})
@@ -2912,6 +3377,11 @@ def create_app(auth_enabled=False, sso_enabled=False, force_sso=False):
             "api_planned_create",
             "api_planned_delete",
             "api_planned_check",
+            # Act on external systems or expose deployment internals.
+            "api_sonarr_scan",
+            "api_radarr_scan",
+            "api_jellyfin_scan",
+            "api_logs",
         }
 
         # Wrap all non-auth, non-static view functions with login_required
@@ -2923,6 +3393,10 @@ def create_app(auth_enabled=False, sso_enabled=False, force_sso=False):
             "auth.setup",
             "auth.oidc_login",
             "auth.oidc_callback",
+            # The container healthcheck has no session and no API key. The
+            # endpoint only reveals version, worker liveness and queue counts
+            # without credentials; the rest is gated inside the view.
+            "api_status",
         }
         for endpoint, view_func in list(app.view_functions.items()):
             if endpoint not in _exempt:

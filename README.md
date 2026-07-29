@@ -132,11 +132,14 @@ Configuration is stored in `~/.aniworld/.env` by default. Set `ANIWORLD_INSTALL_
 
 ## Docker
 
-The included Compose file runs the Web UI on port `8080`, keeps app data in a named volume, and saves downloads in `./Downloads`.
+The included Compose file runs the Web UI on port `8080`, keeps config and the
+queue database in a named volume, and stages downloads on your media mount.
 
 ```bash
-mkdir -p Downloads
+cp .env.example .env
+$EDITOR .env
 docker compose up -d
+docker compose ps          # wait for "healthy"
 ```
 
 Open `http://localhost:8080` when the container is ready.
@@ -152,7 +155,49 @@ To build the image locally instead of using the published image, change `docker-
 docker compose up -d --build
 ```
 
-The comments in [`docker-compose.yaml`](docker-compose.yaml) cover authentication, OIDC, language, provider, naming, and other common settings.
+`.env.example` and the comments in [`docker-compose.yaml`](docker-compose.yaml)
+cover volumes, authentication, OIDC, language, provider and naming settings.
+
+<p align="right">(<a href="#readme-top">back to top</a>)</p>
+
+## Homelab: Sonarr, Radarr & Jellyfin
+
+Run as a 24/7 service that hands finished downloads to your existing media
+stack. Files are staged, verified, and then imported by Sonarr or Radarr, which
+do the renaming and decide where the file ends up — this container never
+creates library folders of its own.
+
+```ini
+# .env
+SONARR_URL=http://sonarr:8989
+SONARR_API_KEY=…
+RADARR_URL=http://radarr:7878
+RADARR_API_KEY=…
+JELLYFIN_URL=http://jellyfin:8096
+JELLYFIN_API_KEY=…
+```
+
+Everything is optional. With nothing configured the downloader behaves exactly
+as it always did and finished files stay in the completed folder.
+
+| Guide | Covers |
+|---|---|
+| [docs/DOCKER.md](docs/DOCKER.md) | Volumes, Proxmox (VM and LXC), SSHFS mounts, healthcheck, backup, troubleshooting |
+| [docs/INTEGRATIONS.md](docs/INTEGRATIONS.md) | API versions, endpoints, example requests and responses, failure modes |
+| [docs/API.md](docs/API.md) | REST endpoints, API-key auth, monitoring |
+| [docs/WEBHOOKS.md](docs/WEBHOOKS.md) | Events, payloads, signature verification |
+
+Highlights:
+
+- **Download queue** with priorities, exponential retry backoff, a stall
+  watchdog, and resume after a container restart. One failing download never
+  stops the queue.
+- **Automatic detection** of series vs. movie from existing metadata, routed to
+  Sonarr or Radarr accordingly.
+- **REST API** with `X-Api-Key` authentication and a `/api/status` healthcheck
+  that reports whether the queue worker is actually alive.
+- **Webhooks** for `download_started`, `download_completed`, `download_failed`
+  and `import_completed`, with optional HMAC signing and a persistent outbox.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 

@@ -45,6 +45,9 @@ all = [
   "authlib",
   "discord.py",
 ]
+dev = [
+  "pytest",                                                                   # offline unit tests, see tests/README.md
+]
 
 
 [project.urls]
@@ -77,3 +80,9 @@ aniworld = [
 
 [project.scripts]
 aniworld = "aniworld.__main__:main"
+
+[tool.pytest.ini_options]
+# Only the offline unit tests run by default. tests/test_aniworld_models.py and
+# tests/test_aniworld_providers.py hit the live sites and are opt-in:
+#   pytest tests/test_aniworld_models.py
+testpaths = ["tests/unit"]

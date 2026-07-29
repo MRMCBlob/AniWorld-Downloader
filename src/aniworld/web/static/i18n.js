@@ -105,6 +105,12 @@
       "settings.ip": "IP Check",
       "settings.public_ip": "Container Public IP",
       "settings.refresh_ip": "Refresh IP",
+      "settings.integrations": "Media Server Integrations",
+      "settings.integrations_status": "Connection Status",
+      "settings.integrations_hint":
+        "Configured through environment variables (SONARR_URL, SONARR_API_KEY, and the Radarr/Jellyfin equivalents) so API keys never reach the database or the browser. Restart the container after changing them.",
+      "settings.logs": "Logs",
+      "settings.logs_refresh": "Refresh",
       "planned.title": "Planned Releases",
       "planned.subtitle":
         "Watch for movies or series that aren't out yet. Once they appear on the selected site, they are downloaded automatically.",
@@ -219,6 +225,12 @@
       "settings.ip": "IP-Prüfung",
       "settings.public_ip": "Öffentliche IP des Containers",
       "settings.refresh_ip": "IP aktualisieren",
+      "settings.integrations": "Mediaserver-Integrationen",
+      "settings.integrations_status": "Verbindungsstatus",
+      "settings.integrations_hint":
+        "Wird über Umgebungsvariablen konfiguriert (SONARR_URL, SONARR_API_KEY und die Radarr-/Jellyfin-Entsprechungen), damit API-Keys weder in die Datenbank noch in den Browser gelangen. Nach Änderungen den Container neu starten.",
+      "settings.logs": "Protokolle",
+      "settings.logs_refresh": "Aktualisieren",
       "planned.title": "Geplante Releases",
       "planned.subtitle":
         "Beobachte Filme oder Serien, die noch nicht erschienen sind. Sobald sie auf der gewählten Seite auftauchen, werden sie automatisch heruntergeladen.",

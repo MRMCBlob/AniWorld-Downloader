@@ -1,0 +1,65 @@
+name: Tests
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The floor from requires-python, plus current.
+        python-version: ["3.10", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install
+        env:
+          # Chromium is ~150 MB and nothing under tests/unit drives a browser.
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[all,dev]"
+
+      - name: Run offline unit tests
+        # testpaths in pyproject.toml keeps this to tests/unit. The older
+        # tests/test_aniworld_*.py scripts hit live streaming sites, so they
+        # cannot run in CI: they would fail on geo-blocks and captchas and
+        # would hammer third-party servers on every push.
+        run: python -m pytest -q
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the container entrypoint
+        # It runs as PID 1 and handles shutdown; a syntax slip here means the
+        # container dies on start or never stops cleanly.
+        run: |
+          sudo apt-get update && sudo apt-get install -y shellcheck
+          shellcheck --shell=sh docker/entrypoint.sh
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Validate the Dockerfile
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          call: check

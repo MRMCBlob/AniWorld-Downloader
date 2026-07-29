@@ -1768,6 +1768,137 @@ h1 {
   color: #fbbf24;
 }
 
+/* Post-download states: verifying the file, then handing it to Sonarr/Radarr */
+.queue-status-verifying {
+  background: rgba(56, 189, 248, 0.15);
+  color: #38bdf8;
+}
+
+/* Distinct from "completed": the file is in the library, not just downloaded */
+.queue-status-imported {
+  background: rgba(16, 185, 129, 0.18);
+  color: #34d399;
+}
+
+.queue-status-paused {
+  background: rgba(148, 163, 184, 0.18);
+  color: #cbd5e1;
+}
+
+/* Extra meta chips */
+.queue-priority,
+.queue-attempts,
+.queue-media-type,
+.queue-retry-at {
+  font-size: 0.78rem;
+  color: #9ca3af;
+  white-space: nowrap;
+}
+
+.queue-priority {
+  color: #fbbf24;
+}
+
+.queue-attempts {
+  color: #fb923c;
+}
+
+.queue-media-type {
+  text-transform: capitalize;
+}
+
+.queue-import-note,
+.queue-last-error {
+  margin-top: 8px;
+  font-size: 0.78rem;
+  padding: 6px 10px;
+  border-radius: 6px;
+}
+
+.queue-import-note {
+  background: rgba(251, 146, 36, 0.1);
+  color: #fb923c;
+}
+
+.queue-last-error {
+  background: rgba(239, 68, 68, 0.08);
+  color: #f87171;
+  word-break: break-word;
+}
+
+.queue-pause,
+.queue-resume {
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: #9ca3af;
+  border-radius: 6px;
+  cursor: pointer;
+  padding: 2px 8px;
+  font-size: 0.72rem;
+  line-height: 1.4;
+}
+
+.queue-pause:hover,
+.queue-resume:hover {
+  color: #e5e7eb;
+  border-color: rgba(255, 255, 255, 0.25);
+}
+
+/* Integrations panel on the settings page */
+.integration-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+  font-size: 0.85rem;
+}
+
+.integration-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: #6b7280;
+}
+
+.integration-dot.ok {
+  background: #4ade80;
+}
+
+.integration-dot.error {
+  background: #f87171;
+}
+
+.integration-name {
+  font-weight: 600;
+  min-width: 90px;
+}
+
+.integration-detail {
+  color: #9ca3af;
+  word-break: break-word;
+}
+
+/* Log panel */
+.log-panel {
+  background: rgba(0, 0, 0, 0.35);
+  border-radius: 8px;
+  padding: 10px 12px;
+  max-height: 340px;
+  overflow: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.75rem;
+  line-height: 1.5;
+  color: #cbd5e1;
+  white-space: pre;
+}
+
+.log-panel-empty {
+  color: #6b7280;
+  font-style: italic;
+  white-space: normal;
+}
+
 /* Progress bar */
 .queue-progress {
   margin-top: 10px;
