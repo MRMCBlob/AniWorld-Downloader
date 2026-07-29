@@ -101,8 +101,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 
 # Create unprivileged user
 RUN adduser --disabled-password --gecos "" aniworld \
-    && mkdir -p /app/Downloads /home/aniworld/.aniworld \
-    && chown -R aniworld:aniworld /app /home/aniworld
+    && mkdir -p /config /media/downloads/aniworld/incomplete /media/downloads/aniworld/completed \
+    && chown -R aniworld:aniworld /app /home/aniworld /config /media
 
 # Install minimal system dependencies (xvfb and core Chromium shared libraries) (with cache)
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
@@ -133,24 +133,43 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 COPY --from=builder /opt/venv /opt/venv
 COPY --from=builder /ms-playwright /ms-playwright
 
+# Entrypoint and healthcheck scripts
+COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY docker/healthcheck.py /usr/local/bin/healthcheck.py
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
 # Environments
+#
+# The defaults describe the homelab layout documented in docs/DOCKER.md: the
+# whole media mount at /media, config on its own volume at /config. Config is
+# deliberately not under /media — SQLite over a network mount has unreliable
+# file locking, and the queue database lives there.
 ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    ANIWORLD_DOWNLOAD_PATH=/app/Downloads \
+    ANIWORLD_INSTALL_FOLDER=/config \
+    ANIWORLD_LOG_DIR=/config/logs \
+    ANIWORLD_DOWNLOAD_PATH=/media/downloads/aniworld/incomplete \
+    ANIWORLD_COMPLETED_PATH=/media/downloads/aniworld/completed \
+    ANIWORLD_WEB_PORT=8080 \
+    ANIWORLD_DOCKER=1 \
     DISPLAY=:99 \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
     NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt
-
-# Ensure Downloads and configuration paths are writable by the unprivileged user
-RUN chown -R aniworld:aniworld /app/Downloads /home/aniworld/.aniworld
 
 USER aniworld
 
 EXPOSE 8080
 
-# This command will be inherited by the final stage
-CMD ["sh", "-c", "Xvfb :99 -screen 0 1280x720x24 -nolisten tcp & sleep 1 && exec aniworld --web-ui --web-expose --no-browser --web-port 8080"]
+VOLUME ["/config"]
+
+# start-period is generous: the first boot resolves dependencies and warms up
+# the Chromium profile, which takes well over a minute on a small VM.
+HEALTHCHECK --interval=30s --timeout=15s --start-period=120s --retries=3 \
+    CMD ["python", "/usr/local/bin/healthcheck.py"]
+
+# Inherited by the final stage
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
 
 # ==========================================
@@ -161,11 +180,19 @@ FROM scratch AS final
 # Copy the entire root filesystem from the runner stage to squash all layers
 COPY --from=runner / /
 
-# Redeclare all necessary metadata since scratch starts empty
+# Redeclare all necessary metadata since scratch starts empty — a squashed
+# stage inherits no ENV, no VOLUME, no HEALTHCHECK and no ENTRYPOINT. Anything
+# added to the runner stage above must be repeated here or it silently
+# disappears from the published image.
 ENV PATH="/opt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    ANIWORLD_DOWNLOAD_PATH=/app/Downloads \
+    ANIWORLD_INSTALL_FOLDER=/config \
+    ANIWORLD_LOG_DIR=/config/logs \
+    ANIWORLD_DOWNLOAD_PATH=/media/downloads/aniworld/incomplete \
+    ANIWORLD_COMPLETED_PATH=/media/downloads/aniworld/completed \
+    ANIWORLD_WEB_PORT=8080 \
+    ANIWORLD_DOCKER=1 \
     DISPLAY=:99 \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
     NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt
@@ -176,4 +203,9 @@ USER aniworld
 
 EXPOSE 8080
 
-CMD ["sh", "-c", "Xvfb :99 -screen 0 1280x720x24 -nolisten tcp & sleep 1 && exec aniworld --web-ui --web-expose --no-browser --web-port 8080"]
+VOLUME ["/config"]
+
+HEALTHCHECK --interval=30s --timeout=15s --start-period=120s --retries=3 \
+    CMD ["python", "/usr/local/bin/healthcheck.py"]
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
