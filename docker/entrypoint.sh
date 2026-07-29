@@ -47,6 +47,7 @@ start_xvfb() {
     fi
 }
 
+# shellcheck disable=SC2317  # reached via trap, which shellcheck cannot see
 shutdown() {
     log "signal received, stopping"
     if [ -n "$app_pid" ] && kill -0 "$app_pid" 2>/dev/null; then
@@ -61,12 +62,21 @@ shutdown() {
 
 trap shutdown TERM INT
 
-# Create the directories we own. The media volume is left alone: the layout
-# under it belongs to Sonarr, Radarr and Jellyfin, and inventing folders there
-# would be a surprise.
-mkdir -p "${ANIWORLD_INSTALL_FOLDER:-/config}" 2>/dev/null || true
-[ -n "${ANIWORLD_DOWNLOAD_PATH:-}" ] && mkdir -p "$ANIWORLD_DOWNLOAD_PATH" 2>/dev/null || true
-[ -n "${ANIWORLD_COMPLETED_PATH:-}" ] && mkdir -p "$ANIWORLD_COMPLETED_PATH" 2>/dev/null || true
+# Create the staging directories we own. Library folders are left alone: the
+# layout under the media mount belongs to Sonarr, Radarr and Jellyfin, and
+# inventing folders there would be a surprise.
+#
+# Failures are ignored on purpose — a read-only or not-yet-mounted share should
+# surface as a clear error from the app, not as an entrypoint crash loop.
+for dir in \
+    "${ANIWORLD_INSTALL_FOLDER:-/config}" \
+    "${ANIWORLD_DOWNLOAD_PATH:-}" \
+    "${ANIWORLD_COMPLETED_PATH:-}"
+do
+    if [ -n "$dir" ]; then
+        mkdir -p "$dir" 2>/dev/null || log "warning: could not create $dir"
+    fi
+done
 
 start_xvfb
 
