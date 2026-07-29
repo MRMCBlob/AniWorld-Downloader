@@ -33,6 +33,7 @@ from flask import (
 
 from ..config import ANIWORLD_CONFIG_DIR
 from ..logger import get_logger
+from .api_auth import has_valid_api_key
 from .db import (
     create_user,
     delete_user,
@@ -157,6 +158,10 @@ def refresh_session_role():
 def login_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
+        # A valid API key stands in for a session, so machine callers
+        # (webhooks, scripts, monitoring) can reach the API without a browser.
+        if has_valid_api_key():
+            return f(*args, **kwargs)
         if session.get("user_id") is None:
             if request.is_json or request.path.startswith("/api/"):
                 return jsonify({"error": "authentication required"}), 401
@@ -169,6 +174,10 @@ def login_required(f):
 def admin_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
+        # The API key is a full-privilege credential: there is only one, and
+        # whoever holds it configured the deployment.
+        if has_valid_api_key():
+            return f(*args, **kwargs)
         if session.get("user_id") is None:
             if request.is_json or request.path.startswith("/api/"):
                 return jsonify({"error": "authentication required"}), 401

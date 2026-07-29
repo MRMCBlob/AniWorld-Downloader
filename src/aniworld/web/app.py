@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import shutil
 import threading
 import time
 
@@ -71,6 +72,7 @@ from .db import (
     init_custom_paths_db,
     init_planned_db,
     init_queue_db,
+    init_webhook_db,
     is_queue_cancelled,
     is_series_queued_or_running,
     move_queue_item,
@@ -423,6 +425,9 @@ def _fetch_htv_trending():
         return None
 
 
+# Process start, for the uptime reported by /api/status.
+_STARTED_AT = time.time()
+
 # Queue worker state
 _queue_worker_started = False
 _queue_lock = threading.Lock()
@@ -760,6 +765,112 @@ def _finish_queue_item(item, episodes, errors, imported_count):
         _notify_discord_completed(item)
 
 
+def _queue_worker_alive():
+    """Whether the queue worker thread is still up.
+
+    A dead worker is the failure that matters most for an unattended service:
+    the UI keeps answering, downloads simply stop happening. Reporting it lets
+    the container healthcheck restart us instead of running silently broken.
+    """
+    if not _queue_worker_started:
+        return False
+    return any(
+        thread.name == "queue-worker" and thread.is_alive()
+        for thread in threading.enumerate()
+    )
+
+
+def _queue_summary():
+    try:
+        stats = get_queue_stats()
+    except Exception as exc:
+        return {"error": str(exc)[:120]}
+    by_status = stats.get("by_status") or {}
+    return {
+        "total": stats.get("total", 0),
+        "by_status": by_status,
+        "active": sum(by_status.get(status, 0) for status in ("downloading", "verifying")),
+        "current": stats.get("currently_running"),
+    }
+
+
+def _path_summary():
+    """Where files go, and how much room is left there."""
+    from pathlib import Path
+
+    from ..postprocess import completed_root
+
+    paths = {
+        "config": ANIWORLD_CONFIG_DIR,
+        "incomplete": os.environ.get("ANIWORLD_DOWNLOAD_PATH") or None,
+        "completed": completed_root(),
+    }
+    summary = {}
+    for name, value in paths.items():
+        if not value:
+            summary[name] = None
+            continue
+        path = Path(value).expanduser()
+        if not path.is_absolute():
+            # Relative download paths are resolved from home elsewhere in the
+            # app; report the same location the downloader will actually use.
+            path = Path.home() / path
+        entry = {"path": str(path), "exists": path.exists()}
+        if entry["exists"]:
+            try:
+                usage = shutil.disk_usage(path)
+                entry["free_bytes"] = usage.free
+                entry["total_bytes"] = usage.total
+            except OSError as exc:
+                entry["error"] = str(exc)[:120]
+        summary[name] = entry
+    return summary
+
+
+def _webhook_urls():
+    from ..integrations import webhooks
+
+    return webhooks.configured_urls()
+
+
+def _run_arr_scan(service, data):
+    """Refresh + rescan a series or movie, or the whole library."""
+    from ..integrations import IntegrationError, get_radarr, get_sonarr
+
+    client = get_sonarr() if service == "sonarr" else get_radarr()
+    if not client.configured:
+        return jsonify({"error": f"{service.title()} is not configured"}), 503
+
+    id_key = "series_id" if service == "sonarr" else "movie_id"
+    raw_id = data.get(id_key)
+    try:
+        target_id = int(raw_id) if raw_id not in (None, "") else None
+    except (TypeError, ValueError):
+        return jsonify({"error": f"{id_key} must be an integer"}), 400
+
+    try:
+        if service == "sonarr":
+            refresh = client.refresh_series(target_id)
+            rescan = client.rescan_series(target_id)
+        else:
+            refresh = client.refresh_movie(target_id)
+            rescan = client.rescan_movie(target_id)
+    except IntegrationError as exc:
+        return jsonify({"error": str(exc)[:300]}), 502
+    except Exception as exc:
+        logger.error(f"{service} scan failed: {exc}", exc_info=True)
+        return jsonify({"error": str(exc)[:300]}), 500
+
+    return jsonify(
+        {
+            "ok": True,
+            id_key: target_id,
+            "refresh": {"id": refresh.get("id"), "status": refresh.get("status")},
+            "rescan": {"id": rescan.get("id"), "status": rescan.get("status")},
+        }
+    )
+
+
 def _register_webhook_subscriber():
     """Wire the webhook dispatcher onto the event bus, if any URL is configured."""
     try:
@@ -860,7 +971,7 @@ def _ensure_queue_worker():
 
     _register_webhook_subscriber()
 
-    thread = threading.Thread(target=_queue_worker, daemon=True)
+    thread = threading.Thread(target=_queue_worker, name="queue-worker", daemon=True)
     thread.start()
 
 
@@ -1374,6 +1485,7 @@ def create_app(auth_enabled=False, sso_enabled=False, force_sso=False):
     init_custom_paths_db()
     init_autosync_db()
     init_planned_db()
+    init_webhook_db()
 
     # Wire up captcha hooks so the Playwright module can signal the Web UI
     from ..playwright import captcha as _captcha_mod
@@ -2072,6 +2184,15 @@ def create_app(auth_enabled=False, sso_enabled=False, force_sso=False):
 
         custom_path_id = data.get("custom_path_id")
 
+        media_type = (data.get("media_type") or "").strip().lower() or None
+        if media_type and media_type not in ("series", "movie"):
+            return jsonify({"error": "media_type must be 'series' or 'movie'"}), 400
+
+        try:
+            priority = int(data.get("priority") or 0)
+        except (TypeError, ValueError):
+            return jsonify({"error": "priority must be an integer"}), 400
+
         queue_id = add_to_queue(
             title,
             series_url,
@@ -2080,6 +2201,8 @@ def create_app(auth_enabled=False, sso_enabled=False, force_sso=False):
             provider,
             username,
             custom_path_id=custom_path_id,
+            priority=priority,
+            media_type=media_type,
         )
         return jsonify({"queue_id": queue_id})
 
@@ -2144,6 +2267,144 @@ def create_app(auth_enabled=False, sso_enabled=False, force_sso=False):
             return jsonify({"error": "item not found or not retryable"}), 400
         _ensure_queue_worker()
         return jsonify({"ok": True})
+
+    @app.route("/api/queue/<int:queue_id>/pause", methods=["POST"])
+    def api_queue_pause(queue_id):
+        ok, err = pause_queue_item(queue_id)
+        if not ok:
+            return jsonify({"error": err}), 400
+        return jsonify({"ok": True})
+
+    @app.route("/api/queue/<int:queue_id>/resume", methods=["POST"])
+    def api_queue_resume(queue_id):
+        ok, err = resume_queue_item(queue_id)
+        if not ok:
+            return jsonify({"error": err}), 400
+        _ensure_queue_worker()
+        return jsonify({"ok": True})
+
+    @app.route("/api/queue/<int:queue_id>/priority", methods=["POST"])
+    def api_queue_set_priority(queue_id):
+        data = request.get_json(silent=True) or {}
+        try:
+            priority = int(data.get("priority"))
+        except (TypeError, ValueError):
+            return jsonify({"error": "priority must be an integer"}), 400
+        if not set_queue_priority(queue_id, priority):
+            return jsonify({"error": "item not found"}), 404
+        return jsonify({"ok": True, "priority": priority})
+
+    # ── Flat aliases ──────────────────────────────────────────────────────────
+    # The documented integration surface is /api/<action>/<id>. These map onto
+    # the /api/queue/<id>/<action> routes the web UI already uses, so external
+    # callers get stable short paths without the UI having to change.
+
+    @app.route("/api/retry/<int:queue_id>", methods=["POST"])
+    def api_retry(queue_id):
+        return api_queue_retry(queue_id)
+
+    @app.route("/api/cancel/<int:queue_id>", methods=["POST"])
+    def api_cancel(queue_id):
+        return api_queue_cancel(queue_id)
+
+    @app.route("/api/pause/<int:queue_id>", methods=["POST"])
+    def api_pause(queue_id):
+        return api_queue_pause(queue_id)
+
+    @app.route("/api/resume/<int:queue_id>", methods=["POST"])
+    def api_resume(queue_id):
+        return api_queue_resume(queue_id)
+
+    # ── Status & integrations ─────────────────────────────────────────────────
+
+    @app.route("/api/status")
+    def api_status():
+        """Health and state summary. Also backs the container HEALTHCHECK.
+
+        Reachable without credentials so the healthcheck does not need the API
+        key baked into the image, but the unauthenticated view is deliberately
+        thin: version, worker liveness and queue counts. Anything that could
+        leak deployment details — paths, integration URLs and versions — is
+        only added for an authenticated caller.
+        """
+        from .api_auth import api_key_enabled, has_valid_api_key
+
+        payload = {
+            "status": "ok",
+            "version": app_version,
+            "uptime_seconds": round(time.time() - _STARTED_AT, 1),
+            "worker_running": _queue_worker_alive(),
+            "queue": _queue_summary(),
+        }
+
+        authenticated = (
+            not auth_enabled
+            or has_valid_api_key()
+            or (get_current_user() is not None if auth_enabled else False)
+        )
+        if not authenticated:
+            return jsonify(payload)
+
+        from ..integrations import integration_status
+
+        payload["integrations"] = integration_status()
+        payload["paths"] = _path_summary()
+        payload["api_key_required"] = api_key_enabled()
+        try:
+            from .db import get_webhook_stats
+
+            payload["webhooks"] = {
+                "configured": len(_webhook_urls()),
+                **get_webhook_stats(),
+            }
+        except Exception as exc:
+            payload["webhooks"] = {"error": str(exc)[:120]}
+        return jsonify(payload)
+
+    @app.route("/api/sonarr/scan", methods=["POST"])
+    def api_sonarr_scan():
+        data = request.get_json(silent=True) or {}
+        return _run_arr_scan("sonarr", data)
+
+    @app.route("/api/radarr/scan", methods=["POST"])
+    def api_radarr_scan():
+        data = request.get_json(silent=True) or {}
+        return _run_arr_scan("radarr", data)
+
+    @app.route("/api/jellyfin/scan", methods=["POST"])
+    def api_jellyfin_scan():
+        from ..integrations import get_jellyfin
+
+        data = request.get_json(silent=True) or {}
+        client = get_jellyfin()
+        if not client.configured:
+            return jsonify({"error": "Jellyfin is not configured"}), 503
+        try:
+            path = (data.get("path") or "").strip()
+            result = client.refresh_for_path(path) if path else client.refresh_all()
+        except Exception as exc:
+            return jsonify({"error": str(exc)[:300]}), 502
+        return jsonify({"ok": True, **result})
+
+    @app.route("/api/logs")
+    def api_logs():
+        """Tail the rotating log file, for the dashboard's log panel."""
+        from ..logger import get_log_file_path
+
+        try:
+            lines = max(1, min(int(request.args.get("lines", 200)), 2000))
+        except (TypeError, ValueError):
+            lines = 200
+
+        path = get_log_file_path()
+        if not path or not os.path.exists(path):
+            return jsonify({"path": None, "lines": []})
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as handle:
+                tail = handle.readlines()[-lines:]
+        except OSError as exc:
+            return jsonify({"error": str(exc)[:200]}), 500
+        return jsonify({"path": str(path), "lines": [line.rstrip() for line in tail]})
 
     # ── Captcha endpoints ─────────────────────────────────────────────────────
 
@@ -3116,6 +3377,11 @@ def create_app(auth_enabled=False, sso_enabled=False, force_sso=False):
             "api_planned_create",
             "api_planned_delete",
             "api_planned_check",
+            # Act on external systems or expose deployment internals.
+            "api_sonarr_scan",
+            "api_radarr_scan",
+            "api_jellyfin_scan",
+            "api_logs",
         }
 
         # Wrap all non-auth, non-static view functions with login_required
@@ -3127,6 +3393,10 @@ def create_app(auth_enabled=False, sso_enabled=False, force_sso=False):
             "auth.setup",
             "auth.oidc_login",
             "auth.oidc_callback",
+            # The container healthcheck has no session and no API key. The
+            # endpoint only reveals version, worker liveness and queue counts
+            # without credentials; the rest is gated inside the view.
+            "api_status",
         }
         for endpoint, view_func in list(app.view_functions.items()):
             if endpoint not in _exempt:
