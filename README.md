@@ -183,6 +183,7 @@ as it always did and finished files stay in the completed folder.
 | Guide | Covers |
 |---|---|
 | [docs/DOCKER.md](docs/DOCKER.md) | Volumes, Proxmox (VM and LXC), SSHFS mounts, healthcheck, backup, troubleshooting |
+| [docs/DOKPLOY.md](docs/DOKPLOY.md) | Deploying on Dokploy: building to GHCR, service setup, networking with the *arr stack |
 | [docs/INTEGRATIONS.md](docs/INTEGRATIONS.md) | API versions, endpoints, example requests and responses, failure modes |
 | [docs/API.md](docs/API.md) | REST endpoints, API-key auth, monitoring |
 | [docs/WEBHOOKS.md](docs/WEBHOOKS.md) | Events, payloads, signature verification |
