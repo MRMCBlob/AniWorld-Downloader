@@ -245,26 +245,27 @@ def _apply_discord_settings(payload, env_updates):
     return None
 
 
-def _persist_discord_env(env_updates):
-    """Persist only the Discord bot keys to the app's .env file.
+def _persist_settings_env(env_updates):
+    """Write web-UI settings through to the app's .env file.
 
-    Every other web-UI setting is intentionally in-memory only (see
-    api_settings_update). The bot config is the one exception: a token that
-    vanished on restart would be useless, so the ANIWORLD_DISCORD_* keys are
-    written through to the .env file. They live in .env.example too, so the
-    startup merge_env keeps them across restarts.
+    A 24/7 container gets restarted often, and settings that only lived in
+    os.environ were silently lost every time. Persisting them is safe with
+    respect to Docker: merge_env() loads the file with override=False, so a
+    value injected through compose/env_file always beats the stored one.
+
+    Only keys that also appear in .env.example survive, because merge_env
+    rebuilds the file from that template on every startup — so any new setting
+    must be added there as well.
     """
-    discord_keys = set(DISCORD_ENV_KEYS.values())
-    subset = {k: v for k, v in env_updates.items() if k in discord_keys}
-    if not subset:
+    if not env_updates:
         return
     try:
         from ..env import persist_env_values
 
         env_path = ANIWORLD_CONFIG_DIR / ".env"
-        persist_env_values(env_path, subset)
+        persist_env_values(env_path, env_updates)
     except Exception as exc:
-        logger.warning(f"Could not persist Discord settings to .env: {exc}")
+        logger.warning(f"Could not persist settings to .env: {exc}")
 
 
 def _notify_discord_completed(item):
@@ -2377,15 +2378,14 @@ def create_app(auth_enabled=False, sso_enabled=False, force_sso=False):
             if error:
                 return jsonify({"error": error}), 400
 
-        # Settings are intentionally in-memory only for the running process.
-        # To persist across restarts, users set them in their .env file.
         for key, value in env_updates.items():
             os.environ[key] = value
 
+        # Apply to the running process first, then write through so the change
+        # survives a container restart.
+        _persist_settings_env(env_updates)
+
         if "discord" in data:
-            # The Discord bot config is the one setting that must survive a
-            # restart, so persist just those keys to .env (see the helper).
-            _persist_discord_env(env_updates)
             _reconcile_discord_bot()
 
         return jsonify({"ok": True})
