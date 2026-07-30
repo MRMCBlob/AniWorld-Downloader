@@ -31,6 +31,16 @@ start_xvfb() {
         log "Xvfb disabled via ANIWORLD_NO_XVFB"
         return
     fi
+
+    # Xvfb refuses to create this directory itself when it is not root — the
+    # check is hardcoded, and it prints
+    #   _XSERVTransmkdir: ERROR: euid != 0, directory /tmp/.X11-unix will not be created
+    # and then has nowhere to put its socket. We run unprivileged, so create it
+    # here. Done at runtime rather than only in the image because /tmp is a
+    # tmpfs in some setups, which would wipe anything baked in.
+    mkdir -p /tmp/.X11-unix 2>/dev/null || true
+    chmod 1777 /tmp/.X11-unix 2>/dev/null || true
+
     Xvfb "$DISPLAY" -screen 0 "$ANIWORLD_XVFB_RESOLUTION" -nolisten tcp &
     xvfb_pid=$!
 
@@ -43,7 +53,8 @@ start_xvfb() {
         sleep 0.1
     done
     if [ ! -e "$socket" ]; then
-        log "warning: Xvfb did not come up within 5s, continuing anyway"
+        log "warning: no X socket at $socket after 5s — captcha solving will"
+        log "         likely fail because Chromium cannot reach the display"
     fi
 }
 

@@ -100,8 +100,14 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     fi
 
 # Create unprivileged user
+#
+# /tmp/.X11-unix is created here as well: Xvfb will not create it when running
+# unprivileged (the euid != 0 check is hardcoded) and then has nowhere to put
+# its socket, leaving Chromium without a display. The entrypoint recreates it
+# too, for setups that mount /tmp as a tmpfs.
 RUN adduser --disabled-password --gecos "" aniworld \
     && mkdir -p /config /media/downloads/aniworld/incomplete /media/downloads/aniworld/completed \
+    && mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix \
     && chown -R aniworld:aniworld /app /home/aniworld /config /media
 
 # Install minimal system dependencies (xvfb and core Chromium shared libraries) (with cache)
