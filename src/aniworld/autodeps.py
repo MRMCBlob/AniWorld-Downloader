@@ -12,11 +12,13 @@ PLATFORM = platform.system()
 try:
     from .common import fetch_github_asset_urls
     from .config import ANIWORLD_CONFIG_DIR, GLOBAL_SESSION
+    from .env import in_docker as _in_docker
     from .logger import get_logger
 
 except ImportError:
     from aniworld.common import fetch_github_asset_urls
     from aniworld.config import ANIWORLD_CONFIG_DIR, GLOBAL_SESSION
+    from aniworld.env import in_docker as _in_docker
     from aniworld.logger import get_logger
 
 
@@ -420,6 +422,12 @@ def _ensure_xvfb():
     if os.environ.get("DISPLAY"):
         return
     _log = get_logger(__name__)
+    if _in_docker():
+        # The image installs Xvfb and the entrypoint starts it. Reaching here
+        # means DISPLAY was unset, and the apt-get path below cannot work
+        # unprivileged anyway.
+        _log.warning("No DISPLAY set in the container — is the entrypoint running Xvfb?")
+        return
     if not shutil.which("Xvfb"):
         _log.info("Xvfb not found — installing via apt...")
         try:
@@ -466,6 +474,15 @@ def ensure_patchright_chromium():
         return
 
     _ensure_xvfb()
+
+    if _in_docker():
+        # The image already contains Chromium under PLAYWRIGHT_BROWSERS_PATH,
+        # and that directory is root-owned and read-only for the app user, so
+        # an install here can only ever fail. Callers guard this too; keeping
+        # the check here means the CLI path inside a container is safe as well.
+        _log.debug("Running in a container — using the preinstalled Chromium")
+        return
+
     try:
         from patchright._impl._driver import compute_driver_executable, get_driver_env
 

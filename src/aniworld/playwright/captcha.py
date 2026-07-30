@@ -316,9 +316,9 @@ _WEBGL_SPOOF_JS = """
 
 
 def _in_docker() -> bool:
-    import os
+    from ..env import in_docker
 
-    return os.path.exists("/.dockerenv") or os.environ.get("ANIWORLD_DOCKER") == "1"
+    return in_docker()
 
 
 def _webgl_spoof_enabled() -> bool:

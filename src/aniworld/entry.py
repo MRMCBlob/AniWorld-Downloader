@@ -6,7 +6,7 @@ from pathlib import Path
 from .arguments import parse_args
 from .autodeps import ensure_patchright_chromium
 from .config import ACTION_METHODS, ANIWORLD_CONFIG_DIR, VERSION
-from .env import merge_env
+from .env import in_docker, merge_env
 from .logger import get_logger
 from .providers import resolve_provider
 
@@ -55,7 +55,12 @@ def aniworld():
         set_terminal_title()
         args = parse_args()
 
-        if not os.getenv("ANIWORLD_DOWNLOAD_PATH") == "/app/Downloads":
+        # The container image ships Chromium already, and its browser directory
+        # is root-owned and read-only for the app user, so a runtime install can
+        # only fail. This used to be detected by comparing the download path
+        # against a hardcoded "/app/Downloads", which silently stopped working
+        # the moment that path became configurable.
+        if not in_docker():
             logger.debug("Checking dependencies...")
             ensure_patchright_chromium()
             logger.debug("Dependencies OK")
