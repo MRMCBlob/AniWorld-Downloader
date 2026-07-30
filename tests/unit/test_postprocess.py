@@ -180,6 +180,21 @@ def test_stage_is_a_no_op_when_staging_is_disabled(tmp_path):
     assert source.exists()
 
 
+def test_prune_stops_at_the_root_and_leaves_non_empty_folders(tmp_path):
+    """What runs after an *arr moved the file out of our download folder."""
+    season = tmp_path / "media" / "Show" / "Season 01"
+    season.mkdir(parents=True)
+    keep = tmp_path / "media" / "Other"
+    keep.mkdir()
+    make_media(keep)
+
+    postprocess._prune_empty_dirs(season, tmp_path / "media")
+
+    assert not (tmp_path / "media" / "Show").exists()
+    assert (tmp_path / "media").exists()
+    assert keep.exists()
+
+
 def test_stage_keeps_the_file_when_both_roots_are_the_same(tmp_path):
     """Downloading straight into the completed root must not delete the file."""
     source = make_media(tmp_path / "media" / "Show")

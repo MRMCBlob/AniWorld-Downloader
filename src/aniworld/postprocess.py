@@ -282,6 +282,11 @@ def finalize(episode, queue_id=None, media_type_override=None, on_stage=None):
     result.imported = bool(import_result.get("ok"))
 
     if result.imported:
+        # Sonarr/Radarr moved the file into the library folder they picked,
+        # which is rarely the folder our naming template produced. Without this
+        # every import leaves an empty season/series folder behind — and with
+        # staging disabled those pile up right next to the real library.
+        _prune_empty_dirs(Path(final_path).parent, _download_root(episode))
         events.emit(
             events.IMPORT_COMPLETED,
             type=info.media_type,
