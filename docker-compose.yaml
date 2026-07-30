@@ -1,7 +1,9 @@
 services:
   aniworld:
-    image: ghcr.io/phoenixthrush/aniworld-downloader:latest
-    container_name: aniworld-downloader
+    # Override with ANIWORLD_IMAGE in .env to run your own build, e.g. a fork
+    # published to your own registry. The default is the upstream image, which
+    # will NOT contain changes you made locally.
+    image: ${ANIWORLD_IMAGE:-ghcr.io/phoenixthrush/aniworld-downloader:latest}
     # build: .
     ports:
       - "8080:8080"

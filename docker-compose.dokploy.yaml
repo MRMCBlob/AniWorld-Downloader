@@ -1,0 +1,92 @@
+# Dokploy variant of docker-compose.yaml.
+#
+# Point a Dokploy "Compose" service at this file (Compose Path in the UI).
+# See docs/DOKPLOY.md for the full walkthrough.
+#
+# Three differences from the plain file:
+#
+#   1. It builds from this repository instead of pulling a published image, so
+#      you get your own code without needing a registry at all.
+#   2. It joins dokploy-network, so Sonarr, Radarr and Jellyfin running as
+#      other Dokploy services are reachable by name. Dokploy isolates compose
+#      projects from each other by default, so without this http://sonarr:8989
+#      does not resolve.
+#   3. No container_name — Dokploy needs to name containers itself, and setting
+#      it breaks its logs and metrics.
+
+services:
+  aniworld:
+    # Built on the Dokploy host from the checked-out repository. This is the
+    # path that needs no registry, no image tag to keep in sync, and no
+    # GitHub Actions run — the deploy always matches the branch Dokploy
+    # cloned.
+    #
+    # The build is not cheap: it downloads Chromium, UPX-compresses it and
+    # squashes the whole rootfs, so budget a few GB and 15-30 minutes the
+    # first time. Layer caching makes later deploys much faster.
+    #
+    # To use a published image instead, set ANIWORLD_IMAGE in the Environment
+    # tab and delete the `build:` block below — with both present, Compose
+    # builds and tags the result as ANIWORLD_IMAGE rather than pulling it.
+    image: ${ANIWORLD_IMAGE:-aniworld-downloader:local}
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    ports:
+      - "8080:8080"
+
+    volumes:
+      # The whole storage mount. An absolute host path is correct here even
+      # though Dokploy generally recommends ../files: this lives outside the
+      # repository, so the fresh git clone on every deploy does not touch it.
+      #
+      # Downloads are staged under /media/downloads/aniworld. Where a finished
+      # file finally lands is decided by the root folders configured in Sonarr
+      # and Radarr — this container never creates library folders of its own.
+      - /media/jellyfin/storagebox:/media
+
+      # Config, queue database, logs and the Chromium profile.
+      #
+      # Deliberately a named volume rather than a folder on the storage box:
+      # SQLite over SSHFS/NFS has unreliable file locking, and the queue
+      # database is written continuously by a 24/7 service.
+      - aniworld-config:/config
+
+    env_file:
+      - .env
+
+    networks:
+      - dokploy-network
+
+    restart: unless-stopped
+
+    # Give a running download time to finish its current ffmpeg mux instead of
+    # leaving a half-written file behind.
+    stop_grace_period: 60s
+
+    # Fails when the queue worker thread has died, not just when HTTP is down —
+    # that is the failure where the UI keeps answering while nothing downloads.
+    healthcheck:
+      test: ["CMD", "python", "/usr/local/bin/healthcheck.py"]
+      interval: 30s
+      timeout: 15s
+      start_period: 120s
+      retries: 3
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+volumes:
+  aniworld-config:
+
+networks:
+  # Created by Dokploy itself. Every service that needs to talk to another
+  # Dokploy service has to join it — including your Sonarr/Radarr/Jellyfin
+  # stack. Leave "Isolated Deployment" off for this service, since that gives
+  # the app its own network and defeats the purpose.
+  dokploy-network:
+    external: true

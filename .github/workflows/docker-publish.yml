@@ -15,6 +15,15 @@ on:
         required: true
         type: boolean
         default: false
+      platforms:
+        # Defaults to amd64 alone because the arm64 leg runs under QEMU
+        # emulation, and this image downloads Chromium, UPX-compresses it and
+        # then squashes the whole rootfs. Emulated that takes hours and can hit
+        # the 6h job limit. Releases still build both (see the step below).
+        description: 'Target platforms for this manual build'
+        required: false
+        type: string
+        default: 'linux/amd64'
 
 env:
   # Use docker.io for Docker Hub if empty
@@ -80,7 +89,9 @@ jobs:
         with:
           context: .
           push: ${{ github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.push == true) }}
-          platforms: linux/amd64,linux/arm64 # <--- Hinzugefügt für Multi-Arch Support
+          # Releases always ship both architectures; a manual run picks (and by
+          # default skips the slow emulated arm64 leg).
+          platforms: ${{ github.event_name == 'release' && 'linux/amd64,linux/arm64' || inputs.platforms }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
