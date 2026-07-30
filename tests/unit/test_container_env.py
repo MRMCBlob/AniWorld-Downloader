@@ -14,13 +14,21 @@ import subprocess
 
 import pytest
 
-from aniworld import autodeps
+from aniworld import autodeps, env
 from aniworld.env import in_docker
+
+# Captured before the autouse fixture below stubs it out, so the probe itself
+# can still be tested.
+_real_cgroup_probe = env._cgroup_names_a_container
 
 
 @pytest.fixture(autouse=True)
 def clean_env(monkeypatch):
     monkeypatch.delenv("ANIWORLD_DOCKER", raising=False)
+    monkeypatch.delenv("KUBERNETES_SERVICE_HOST", raising=False)
+    # The machine running the suite may itself be containerised; pin the probe
+    # so these tests measure the code and not their own CI runner.
+    monkeypatch.setattr(env, "_cgroup_names_a_container", lambda: False)
     # A DISPLAY is always set by the container entrypoint; without it the Xvfb
     # branch runs first and these tests would measure the wrong thing.
     monkeypatch.setenv("DISPLAY", ":99")
@@ -42,6 +50,58 @@ def test_docker_is_detected_from_dockerenv(monkeypatch):
     assert in_docker() is True
 
 
+def test_podman_is_detected_from_containerenv(monkeypatch):
+    """Podman writes /run/.containerenv and never /.dockerenv."""
+    import os
+
+    monkeypatch.setattr(os.path, "exists", lambda p: p == "/run/.containerenv")
+
+    assert in_docker() is True
+
+
+def test_kubernetes_is_detected_from_the_injected_service_env(monkeypatch):
+    import os
+
+    monkeypatch.setattr(os.path, "exists", lambda p: False)
+    monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.96.0.1")
+
+    assert in_docker() is True
+
+
+def test_a_runtime_without_marker_files_is_detected_from_cgroup(monkeypatch):
+    """Rootless and nested runtimes leave no marker file; cgroup still names them."""
+    import os
+
+    monkeypatch.setattr(os.path, "exists", lambda p: False)
+    monkeypatch.setattr(env, "_cgroup_names_a_container", lambda: True)
+
+    assert in_docker() is True
+
+
+def test_the_cgroup_probe_ignores_an_ordinary_host(monkeypatch, tmp_path):
+    """A desktop's cgroup must not read as a container — that would disable
+    the browser install for everyone running under systemd."""
+    host = tmp_path / "host-cgroup"
+    host.write_text("0::/user.slice/user-1000.slice/session-3.scope\n")
+    container = tmp_path / "container-cgroup"
+    container.write_text("0::/docker/8f2c0b1e4a\n")
+
+    real_open = open
+
+    def fake_open(path, *args, **kwargs):
+        if path == "/proc/self/cgroup":
+            return real_open(fake_open.target, *args, **kwargs)
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", fake_open)
+
+    fake_open.target = host
+    assert _real_cgroup_probe() is False
+
+    fake_open.target = container
+    assert _real_cgroup_probe() is True
+
+
 def test_no_browser_install_is_attempted_in_a_container(monkeypatch):
     """The regression: this used to shell out and fail on every start."""
     monkeypatch.setenv("ANIWORLD_DOCKER", "1")
@@ -55,12 +115,16 @@ def test_no_browser_install_is_attempted_in_a_container(monkeypatch):
     autodeps.ensure_patchright_chromium()
 
 
-def test_install_is_still_attempted_outside_a_container(monkeypatch):
+def test_install_is_still_attempted_outside_a_container(monkeypatch, tmp_path):
     """The container guard must not disable the feature for normal installs."""
     import os
 
     monkeypatch.delenv("ANIWORLD_DOCKER", raising=False)
     monkeypatch.setattr(os.path, "exists", lambda p: False)
+    # An empty, writable browser directory: nothing installed yet, so the
+    # install must run. Without this the result would depend on whether the
+    # machine running the suite happens to have Chromium already.
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path / "browsers"))
 
     calls = []
 

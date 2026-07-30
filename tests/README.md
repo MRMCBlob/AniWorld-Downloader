@@ -26,6 +26,8 @@ runs these and nothing else.
 | `test_events.py` | Event bus, abort registry |
 | `test_webhooks.py` | Outbox, signing, retries |
 | `test_api.py` | REST endpoints, API-key auth |
+| `test_container_env.py` | Container detection and the startup work it suppresses |
+| `test_patchright_install.py` | The startup Chromium check: when it installs, and what it logs |
 | `test_pipeline_end_to_end.py` | All of it wired together |
 
 ## `tests/test_aniworld_*.py` — live
