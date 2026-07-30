@@ -9,14 +9,54 @@ from dotenv import dotenv_values, load_dotenv
 ENV_LINE_RE = re.compile(r"^([^#\n=]+?)=(.*)$")
 
 
+# Substrings that only ever show up in a container's cgroup paths. Kept
+# narrow on purpose: a false positive here disables the browser install on a
+# normal desktop, which is worse than the missed detection it would fix.
+_CONTAINER_CGROUP_MARKERS = (
+    "/docker/",
+    "/docker-",
+    "/containerd",
+    "containerd.service",
+    "/kubepods",
+    "libpod",
+    "/lxc/",
+)
+
+
+def _cgroup_names_a_container() -> bool:
+    """Whether /proc/self/cgroup mentions a container runtime.
+
+    The last resort of in_docker(): cgroup v1 hosts still name the runtime in
+    every line, which catches runtimes that leave no marker file behind.
+    """
+    try:
+        with open("/proc/self/cgroup", encoding="utf-8", errors="replace") as fh:
+            cgroup = fh.read()
+    except OSError:
+        return False
+    return any(marker in cgroup for marker in _CONTAINER_CGROUP_MARKERS)
+
+
 def in_docker() -> bool:
     """Whether we are running inside a container.
 
     Lives here rather than in a heavier module so the cheap startup paths can
     ask without importing the browser stack. ANIWORLD_DOCKER is the manual
-    override for runtimes that do not create /.dockerenv.
+    override for runtimes none of the probes below recognise.
+
+    /.dockerenv alone is not enough: Podman writes /run/.containerenv instead,
+    Kubernetes injects its service env into every pod, and rootless or nested
+    runtimes may write no marker file at all. Every one of those used to look
+    like a bare-metal install, so the app tried to install a browser into the
+    image's read-only browser directory and logged a failure on every start.
     """
-    return os.path.exists("/.dockerenv") or os.environ.get("ANIWORLD_DOCKER") == "1"
+    if os.environ.get("ANIWORLD_DOCKER") == "1":
+        return True
+    if os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv"):
+        return True
+    if os.environ.get("KUBERNETES_SERVICE_HOST"):
+        return True
+    return _cgroup_names_a_container()
 
 
 def initialize_app_env(example_path: Path, default_dir: Path) -> Path:

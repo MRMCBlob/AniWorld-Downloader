@@ -1,5 +1,7 @@
+import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -464,6 +466,101 @@ def _default_playwright_browsers_path() -> Path:
     return cache_dir / "ms-playwright"
 
 
+def _browser_registry_dir(driver_cli: str) -> Path:
+    """The directory patchright downloads its browsers into.
+
+    Mirrors the driver's own resolution: PLAYWRIGHT_BROWSERS_PATH wins, the
+    literal "0" means "next to the driver package", and anything else falls
+    back to the platform cache directory.
+    """
+    configured = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
+    if configured == "0":
+        return Path(driver_cli).parent / ".local-browsers"
+    if configured:
+        return Path(configured).expanduser()
+    return _default_playwright_browsers_path()
+
+
+def _expected_browser_dirs(registry_dir: Path, driver_cli: str) -> List[Path]:
+    """Where the Chromium builds this patchright version wants would live.
+
+    The revisions come from the driver's own browsers.json, so an upgraded
+    patchright asks for a build the previous one never downloaded and the
+    install is correctly attempted again. Both builds are checked: the captcha
+    solver runs headed (chromium) and the stream sniffers run headless, which
+    Playwright serves from the separate headless-shell build.
+    """
+    browsers_json = Path(driver_cli).parent / "browsers.json"
+    try:
+        with open(browsers_json, encoding="utf-8") as fh:
+            descriptors = json.load(fh).get("browsers", [])
+    except (OSError, ValueError):
+        return []
+
+    wanted = {"chromium", "chromium-headless-shell"}
+    dirs = []
+    for descriptor in descriptors:
+        name = descriptor.get("name")
+        revision = descriptor.get("revision")
+        if name in wanted and revision:
+            # The driver swaps dashes for underscores so that one browser name
+            # can never be read as a prefix of another.
+            dirs.append(registry_dir / f"{name.replace('-', '_')}-{revision}")
+    return dirs
+
+
+def _chromium_is_installed(registry_dir: Path, driver_cli: str) -> bool:
+    """Whether every expected build is present and fully downloaded.
+
+    INSTALLATION_COMPLETE is the marker the driver itself writes last, so a
+    half-finished download does not read as installed.
+    """
+    expected = _expected_browser_dirs(registry_dir, driver_cli)
+    if not expected:
+        return False
+    return all((path / "INSTALLATION_COMPLETE").exists() for path in expected)
+
+
+def _writable_target(registry_dir: Path) -> bool:
+    """Whether an install could create or extend the registry directory.
+
+    Walks up to the nearest existing ancestor, because the usual case on a
+    fresh machine is that none of the directory exists yet.
+    """
+    candidate = registry_dir
+    while True:
+        if candidate.exists():
+            return os.access(candidate, os.W_OK | os.X_OK)
+        parent = candidate.parent
+        if parent == candidate:
+            return False
+        candidate = parent
+
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
+
+
+def _tail(output: str, limit: int = 1200) -> str:
+    """The useful end of the driver's output, condensed into one log line.
+
+    The driver colours everything and retries a failing download three times,
+    so the raw text is mostly escape codes and repeats. Dropping both leaves
+    room for the part that names the actual cause.
+    """
+    lines: List[str] = []
+    seen = set()
+    for line in _ANSI_RE.sub("", output).splitlines():
+        line = line.strip()
+        if line and line not in seen:
+            seen.add(line)
+            lines.append(line)
+
+    text = " | ".join(lines)
+    if len(text) <= limit:
+        return text
+    return "..." + text[-limit:]
+
+
 def ensure_patchright_chromium():
     """Install the patchright Chromium browser if not already present."""
     _log = get_logger(__name__)
@@ -498,16 +595,45 @@ def ensure_patchright_chromium():
         if PLATFORM != "Windows" and not os.access(driver_path, os.X_OK):
             driver_path.chmod(driver_path.stat().st_mode | 0o111)
 
+        # Ask the filesystem before shelling out. The install is a node process
+        # that re-downloads nothing when the browser is already there, but it
+        # still costs a second of startup, and in an image that ships Chromium
+        # under a read-only path it is the failure this whole function used to
+        # log on every single start.
+        registry_dir = _browser_registry_dir(driver_cli)
+        if _chromium_is_installed(registry_dir, driver_cli):
+            _log.debug(f"patchright chromium already present in {registry_dir}")
+            return
+
+        if not _writable_target(registry_dir):
+            _log.warning(
+                f"Chromium is missing from {registry_dir} and that directory is "
+                "not writable, so it cannot be installed. Point "
+                "PLAYWRIGHT_BROWSERS_PATH at a writable directory, or run "
+                "'patchright install chromium' as the user owning that one."
+            )
+            return
+
         _log.debug("Installing patchright chromium (this may take a moment)...")
-        subprocess.run(
+        result = subprocess.run(
             [driver_path.as_posix(), driver_cli, "install", "chromium"],
-            check=True,
+            check=False,
             env=get_driver_env(),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            errors="replace",
         )
+        if result.returncode != 0:
+            # The output is the only thing that says *why* — a bare exit status
+            # is not something anyone can act on from a log file.
+            _log.warning(
+                f"patchright chromium install failed (exit {result.returncode}): "
+                f"{_tail(result.stdout or '')}"
+            )
+            return
         _log.debug("patchright chromium is ready")
-    except (subprocess.CalledProcessError, OSError) as e:
+    except (subprocess.SubprocessError, OSError) as e:
         _log.warning(f"patchright chromium install failed: {e}")
 
 

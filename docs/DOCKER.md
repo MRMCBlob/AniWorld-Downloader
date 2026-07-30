@@ -291,6 +291,19 @@ Chromium needs the namespaces an unprivileged LXC withholds by default. See
 [Proxmox](#proxmox). `ANIWORLD_CAPTCHA_DEBUG_LOG=1` puts the browser's console
 errors in the log.
 
+**`patchright chromium install failed` in the log**
+
+The image ships Chromium under `/ms-playwright`, and that directory is
+root-owned and read-only for the app user, so the container never installs a
+browser at startup — it skips the check as soon as it recognises that it is
+running in one. Podman, Kubernetes and LXC are recognised as well.
+
+Seeing this warning at all means the check ran, which is worth reporting.
+`ANIWORLD_DOCKER=1` in the environment forces the skip in the meantime. The
+warning now quotes the driver's own output, so the line says what actually
+failed — a proxy without a trusted CA and a blocked CDN are the usual causes
+outside a container.
+
 **Container stops taking new downloads after a while**
 
 Look for `no progress for Ns, aborting` in the log — the stall watchdog fired.
