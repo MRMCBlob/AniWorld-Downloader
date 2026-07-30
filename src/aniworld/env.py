@@ -9,6 +9,16 @@ from dotenv import dotenv_values, load_dotenv
 ENV_LINE_RE = re.compile(r"^([^#\n=]+?)=(.*)$")
 
 
+def in_docker() -> bool:
+    """Whether we are running inside a container.
+
+    Lives here rather than in a heavier module so the cheap startup paths can
+    ask without importing the browser stack. ANIWORLD_DOCKER is the manual
+    override for runtimes that do not create /.dockerenv.
+    """
+    return os.path.exists("/.dockerenv") or os.environ.get("ANIWORLD_DOCKER") == "1"
+
+
 def initialize_app_env(example_path: Path, default_dir: Path) -> Path:
     """Resolve the app directory and load its .env file.
 
