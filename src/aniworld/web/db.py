@@ -933,10 +933,18 @@ def delete_completed_queue_item(queue_id):
 
 
 def clear_completed():
+    """Drop every item the worker is done with.
+
+    Built from TERMINAL_STATUSES rather than a hard-coded list: 'imported'
+    arrived with the *arr pipeline and was missing here, so the items that
+    succeeded most completely were the only ones that could never be cleared.
+    """
     conn = get_db()
     try:
+        placeholders = ",".join("?" for _ in TERMINAL_STATUSES)
         conn.execute(
-            "DELETE FROM download_queue WHERE status IN ('completed', 'failed', 'cancelled')"
+            f"DELETE FROM download_queue WHERE status IN ({placeholders})",
+            TERMINAL_STATUSES,
         )
         conn.commit()
     finally:

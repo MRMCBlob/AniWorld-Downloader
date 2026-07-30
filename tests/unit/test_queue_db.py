@@ -295,3 +295,16 @@ def test_terminal_status_records_completed_at_and_error(db):
     row = db.get_queue()[0]
     assert row["completed_at"] is not None
     assert row["last_error"] == "too many spaces"
+
+
+def test_clear_completed_removes_every_terminal_status(db):
+    """'imported' used to survive the clear, so successful items piled up."""
+    for status in db.TERMINAL_STATUSES:
+        db.set_queue_status(add(db, title=status), status)
+    queued = add(db, title="still queued")
+    running = add(db, title="running")
+    db.set_queue_status(running, "downloading")
+
+    db.clear_completed()
+
+    assert sorted(item["id"] for item in db.get_queue()) == sorted([queued, running])

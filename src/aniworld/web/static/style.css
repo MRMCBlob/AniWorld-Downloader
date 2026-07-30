@@ -1641,6 +1641,10 @@ h1 {
   letter-spacing: -0.01em;
 }
 
+#queueClearBtn {
+  margin-bottom: 14px;
+}
+
 /* Queue list */
 .queue-list {
   max-height: 500px;

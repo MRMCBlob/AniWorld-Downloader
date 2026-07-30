@@ -526,6 +526,21 @@ async function retryQueueItem(id) {
   }
 }
 
+async function clearFinishedQueue() {
+  // Removing a single finished item is not possible — the DELETE route only
+  // accepts queued ones — so this is the only way to empty the history.
+  try {
+    const resp = await fetch("/api/queue/completed", { method: "DELETE" });
+    const data = await resp.json();
+    if (typeof showToast === "function") {
+      showToast(data.error || "Cleared finished downloads");
+    }
+    loadQueue();
+  } catch (e) {
+    /* ignore */
+  }
+}
+
 async function pauseQueueItem(id) {
   await queueAction(id, "pause", "Paused");
 }

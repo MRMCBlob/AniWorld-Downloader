@@ -65,6 +65,8 @@
     <div class="queue-modal">
       <button class="close" onclick="closeQueueModal()">&times;</button>
       <h2 class="queue-modal-title" data-i18n="queue.title">Download Queue</h2>
+      <button class="queue-retry-btn" id="queueClearBtn" onclick="clearFinishedQueue()"
+              data-i18n="queue.clearfinished">Clear finished</button>
       <div id="queueList" class="queue-list"></div>
     </div>
   </div>
