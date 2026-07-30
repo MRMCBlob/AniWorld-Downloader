@@ -180,6 +180,14 @@ def test_stage_is_a_no_op_when_staging_is_disabled(tmp_path):
     assert source.exists()
 
 
+def test_stage_keeps_the_file_when_both_roots_are_the_same(tmp_path):
+    """Downloading straight into the completed root must not delete the file."""
+    source = make_media(tmp_path / "media" / "Show")
+
+    assert stage_file(source, tmp_path / "media", tmp_path / "media") == source
+    assert source.exists()
+
+
 def test_stage_overwrites_an_existing_destination(roots):
     incomplete, completed = roots
     source = make_media(incomplete / "Show")

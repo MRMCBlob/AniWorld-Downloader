@@ -26,6 +26,12 @@ services:
     env_file:
       - .env
 
+    # Lets SONARR_URL / RADARR_URL / JELLYFIN_URL point at ports published on
+    # the host (http://host.docker.internal:8989) when those services are not
+    # on a Docker network this container can resolve names on.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
     restart: unless-stopped
 
     # Give a running download time to finish its current ffmpeg mux instead of

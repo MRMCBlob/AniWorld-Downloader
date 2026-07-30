@@ -168,6 +168,10 @@ def stage_file(source, incomplete_root, target_root):
         relative = Path(source.name)
 
     destination = Path(target_root) / relative
+    if destination == source:
+        # Staging into the same tree the download wrote to. Without this the
+        # unlink below would delete the file we are about to move.
+        return source
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.exists():
         destination.unlink()

@@ -1313,6 +1313,29 @@ def _get_version():
     return ""
 
 
+def _asset_version(static_folder, fallback):
+    """Cache-buster for /static, derived from the files themselves.
+
+    ``SEND_FILE_MAX_AGE_DEFAULT`` pins static files in the browser for a year,
+    so the ``?v=`` token is the only thing that can invalidate them. The app
+    version alone is not enough: code ships between releases, and a browser
+    that cached ``queue.js?v=4.8.6`` keeps running it after an upgrade that
+    left the version untouched — which is exactly how the queue modal ended up
+    rendering with an outdated status list.
+    """
+    from pathlib import Path
+
+    try:
+        newest = max(
+            path.stat().st_mtime_ns
+            for path in Path(static_folder).rglob("*")
+            if path.is_file()
+        )
+    except (OSError, ValueError):
+        return fallback
+    return f"{fallback}-{newest:x}"
+
+
 def _proxy_image_url(url: str) -> str:
     if not url:
         return url
@@ -1383,6 +1406,7 @@ def create_app(auth_enabled=False, sso_enabled=False, force_sso=False):
     app = Flask(__name__)
     app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 31536000
     app_version = _get_version()
+    asset_version = _asset_version(app.static_folder, app_version)
 
     base_url = os.environ.get("ANIWORLD_WEB_BASE_URL", "").strip().rstrip("/")
     if base_url:
@@ -1478,7 +1502,7 @@ def create_app(auth_enabled=False, sso_enabled=False, force_sso=False):
         lang = os.environ.get("ANIWORLD_UI_LANGUAGE", "en").lower()
         if lang not in SUPPORTED_UI_LANGUAGES:
             lang = "en"
-        return {"ui_language": lang}
+        return {"ui_language": lang, "asset_version": asset_version}
 
     # Initialize download queue, custom paths and autosync (works with or without auth)
     init_queue_db()
