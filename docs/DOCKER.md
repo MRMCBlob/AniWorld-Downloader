@@ -68,10 +68,15 @@ $EDITOR .env          # fill in the Sonarr/Radarr/Jellyfin keys
 # Staging folders. The library folders are Sonarr's and Radarr's business.
 mkdir -p /media/jellyfin/storagebox/downloads/aniworld/incomplete
 mkdir -p /media/jellyfin/storagebox/downloads/aniworld/completed
+touch /media/jellyfin/storagebox/.aniworld-storage
 
 docker compose up -d
 docker compose ps      # wait for "healthy"
 ```
+
+For SSHFS/NFS, set `ANIWORLD_STORAGE_SENTINEL=/media/.aniworld-storage` in
+`.env`. This prevents an unavailable remote mount from being mistaken for a
+writable empty directory on the host.
 
 The Web UI is on <http://localhost:8080>.
 
@@ -224,9 +229,12 @@ docker compose ps
 docker inspect --format '{{json .State.Health}}' aniworld-downloader | jq
 ```
 
-`restart: unless-stopped` plus the healthcheck means a wedged process gets
-restarted, and the queue picks up where it left off: any item left in
-`downloading` or `verifying` is handed back to `queued` on startup.
+Docker does not apply restart policies to health-state changes on its own. The
+container entrypoint therefore watches the same healthcheck and exits after
+three consecutive failures; `restart: unless-stopped` then restarts it. The
+queue picks up where it left off: any item left in `downloading` or `verifying`
+is handed back to `queued` on startup. Set `ANIWORLD_HEALTH_WATCHDOG=0` only if
+another supervisor already owns this behavior.
 
 ---
 
@@ -267,6 +275,10 @@ docker inspect --format '{{json .State.Health}}' aniworld-downloader | jq -r '.L
 `the download queue worker is not running` means the worker thread died; the
 container will be restarted. Check `/config/logs/aniworld.log` for what killed
 it.
+
+`storage sentinel is missing` means the remote media mount disappeared. Restore
+the mount and let the container restart; it will not write into the underlying
+host directory while the sentinel is absent.
 
 **Downloads finish but never appear in the library**
 

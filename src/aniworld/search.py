@@ -734,11 +734,22 @@ def _normalize_s_to_link(link: str) -> str:
 
 def query_s_to(keyword):
     """Search serienstream.to for the given keyword and return a list of matching series with their URLs."""
-    from .models.s_to.http import sto_get
+    from .models.s_to.http import sto_base_url, sto_get
 
     # Use query params to ensure proper URL encoding (spaces, umlauts, etc.)
     url = "https://serienstream.to/api/search/suggest"
-    response = sto_get(url, params={"term": keyword})
+    # Version 2 serves this route only as an XMLHttpRequest. The global
+    # session deliberately carries document-navigation headers, which now
+    # produce a HTML 404 from this otherwise valid endpoint.
+    response = sto_get(
+        url,
+        params={"term": keyword},
+        headers={
+            "Accept": "application/json",
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": f"{sto_base_url()}/",
+        },
+    )
 
     data = response.json()
     shows = data.get("shows", []) or []

@@ -2,7 +2,7 @@ import re
 from urllib.parse import urljoin
 
 from ...config import SERIENSTREAM_SEASON_PATTERN, logger
-from .http import sto_get
+from .http import sto_get, sto_rewrite
 
 
 class SerienstreamSeason:
@@ -35,7 +35,7 @@ class SerienstreamSeason:
         if not self.__is_valid_serienstream_season_url(url):
             raise ValueError(f"Invalid Serienstream season URL: {url}")
 
-        self.url = url
+        self.url = sto_rewrite(url)
         self._series = series
 
         self.__season_number = None
@@ -92,6 +92,7 @@ class SerienstreamSeason:
         if self.__html is None:
             logger.debug(f"fetching ({self.url})...")
             resp = sto_get(self.url)
+            self.url = sto_rewrite(self.url)
             self.__html = resp.text
         return self.__html
 

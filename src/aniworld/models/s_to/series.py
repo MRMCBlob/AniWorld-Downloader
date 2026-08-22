@@ -3,7 +3,7 @@ from urllib.parse import urljoin, urlparse
 
 from ...config import SERIENSTREAM_SERIES_PATTERN, logger
 from ..common import clean_title
-from .http import sto_get
+from .http import sto_get, sto_rewrite, sto_url
 
 
 class SerienstreamSeries:
@@ -45,7 +45,7 @@ class SerienstreamSeries:
         if not self.__is_valid_serienstream_series_url(url):
             raise ValueError(f"Invalid Serienstream series URL: {url}")
 
-        self.url = url
+        self.url = sto_rewrite(url)
 
         self.__title = None
         self.__title_cleaned = None
@@ -167,6 +167,10 @@ class SerienstreamSeries:
         if self.__html is None:
             logger.debug(f"fetching ({self.url})...")
             resp = sto_get(self.url)
+            # A fallback may have become active while fetching. Keep the
+            # model URL aligned so child objects and browser-based redirects
+            # do not return to the failed origin.
+            self.url = sto_rewrite(self.url)
             self.__html = resp.text
         return self.__html
 
@@ -300,12 +304,10 @@ class SerienstreamSeries:
         if match:
             raw_url = urljoin(self.url, match.group("url").strip())
             parsed = urlparse(raw_url)
-            path = parsed.path
+            path_and_query = parsed.path
             if parsed.query:
-                query = f"?{parsed.query}"
-            else:
-                query = ""
-            return f"http://186.2.175.5{path}" + query
+                path_and_query += f"?{parsed.query}"
+            return sto_url(path_and_query)
 
         return None
 

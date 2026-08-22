@@ -1,7 +1,9 @@
 """Container healthcheck.
 
-Exits 0 when the service is genuinely working, non-zero otherwise, so Docker
-can restart a process that is up but no longer doing anything.
+Exits 0 when the service is genuinely working, non-zero otherwise. The
+entrypoint watches this result and exits after repeated failures, allowing the
+container restart policy to recover the service (Docker itself does not
+restart a container merely because its health state changed).
 
 "HTTP 200" is not the interesting question here. The failure that actually
 happens in a long-running deployment is a dead queue worker: the web UI keeps
@@ -14,14 +16,45 @@ this would be a whole package for a request Python can already make.
 
 import json
 import os
+import shutil
 import sys
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 TIMEOUT = 10
 
 
+def storage_error():
+    """Return a storage error string, or ``None`` when configured paths work."""
+    configured = {
+        os.environ.get("ANIWORLD_INSTALL_FOLDER", "").strip(),
+        os.environ.get("ANIWORLD_DOWNLOAD_PATH", "").strip(),
+        os.environ.get("ANIWORLD_COMPLETED_PATH", "").strip(),
+    }
+    for raw in sorted(path for path in configured if path):
+        path = Path(raw)
+        if not path.is_dir():
+            return f"storage directory is missing: {path}"
+        if not os.access(path, os.W_OK | os.X_OK):
+            return f"storage directory is not writable: {path}"
+        try:
+            shutil.disk_usage(path)
+        except OSError as exc:
+            return f"storage directory is unavailable: {path}: {exc}"
+
+    sentinel = os.environ.get("ANIWORLD_STORAGE_SENTINEL", "").strip()
+    if sentinel and not Path(sentinel).is_file():
+        return f"storage sentinel is missing: {sentinel}"
+    return None
+
+
 def main():
+    error = storage_error()
+    if error:
+        print(f"unhealthy: {error}")
+        return 1
+
     port = os.environ.get("ANIWORLD_WEB_PORT", "8080")
     url = f"http://127.0.0.1:{port}/api/status"
 

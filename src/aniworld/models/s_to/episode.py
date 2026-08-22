@@ -12,7 +12,7 @@ from ...config import (
 )
 from ...extractors import provider_functions
 from ..common import check_downloaded
-from .http import sto_get, sto_host
+from .http import sto_get, sto_rewrite, sto_url
 from ..common.common import (
     download as episode_download,
 )
@@ -129,7 +129,7 @@ class SerienstreamEpisode:
         if not self.__is_valid_serienstream_episode_url(url):
             raise ValueError(f"Invalid Serienstream episode URL: {url}")
 
-        self.url = url
+        self.url = sto_rewrite(url)
         self._series = series
         self._season = season
 
@@ -449,6 +449,7 @@ class SerienstreamEpisode:
                 raise ValueError("Episode URL is missing for HTML fetch.")
             logger.debug(f"fetching ({self.url})...")
             resp = sto_get(self.url)
+            self.url = sto_rewrite(self.url)
             self.__html = resp.text
         return self.__html
 
@@ -519,9 +520,7 @@ class SerienstreamEpisode:
             else:
                 continue
 
-            provider_data.setdefault(key, {})[provider_name] = (
-                f"https://{sto_host()}{play_url}"
-            )
+            provider_data.setdefault(key, {})[provider_name] = sto_url(play_url)
 
         return provider_data
 

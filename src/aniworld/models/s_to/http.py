@@ -1,89 +1,155 @@
-"""Domain-fallback fetching for serienstream.
+"""Domain-fallback fetching for SerienStream.
 
-serienstream.to goes down from time to time, so requests are transparently
-retried against the alternate domain (serienstream.cx) and, as a last resort,
-the raw IP with a Host header. The first host that answers is remembered and
-reused, and any serienstream URL is rewritten to it so pages, redirect links
-and stream resolution all stay on the same working host.
+The public domain has changed more than once. Requests are therefore retried
+against a configurable list of complete base URLs, including the scheme. The
+scheme matters: the direct-IP fallback is HTTP-only, so treating every endpoint
+as HTTPS silently made the last-resort path unusable.
 """
 
+import os
 import re
-import warnings
-
-from urllib3.exceptions import InsecureRequestWarning
+import threading
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 try:
-    from ...config import GLOBAL_SESSION
+    from ...config import GLOBAL_SESSION, logger
 except ImportError:
-    from aniworld.config import GLOBAL_SESSION
+    from aniworld.config import GLOBAL_SESSION, logger
 
-warnings.simplefilter("ignore", InsecureRequestWarning)
-
-# Reachable hosts, in preference order. The IP is a last resort and needs a
-# Host header (handled below) because it serves the same site.
+# Kept for compatibility with callers that imported these names directly.
 STO_DOMAINS = ["serienstream.to", "serienstream.cx"]
 STO_IP = "186.2.175.5"
 
+DEFAULT_STO_ENDPOINTS = (
+    "https://serienstream.to",
+    "https://serienstream.cx",
+    f"http://{STO_IP}",
+)
+
 # Match any known serienstream host so URLs can be rewritten to the active one.
 _HOST_RE = re.compile(
-    r"^(https?://)(?:www\.)?(?:serienstream\.(?:to|cx)|s\.to|186\.2\.175\.5)",
+    r"^https?://(?:www\.)?(?:serienstream\.(?:to|cx)|s\.to|186\.2\.175\.5)"
+    r"(?=[:/]|$)",
     re.IGNORECASE,
 )
 
-_active_idx = 0
+_active_endpoint = None
+_active_lock = threading.Lock()
+
+
+def _normalise_endpoint(value):
+    """Return a safe origin URL, or ``None`` for an invalid value."""
+    value = (value or "").strip().rstrip("/")
+    parsed = urlsplit(value)
+    if (
+        parsed.scheme not in ("http", "https")
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.path not in ("", "/")
+        or parsed.query
+        or parsed.fragment
+    ):
+        return None
+    return urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
+
+
+def sto_endpoints():
+    """Configured endpoint origins in failover order.
+
+    ``ANIWORLD_STO_ENDPOINTS`` is intentionally read for every request. A
+    Dokploy environment change therefore takes effect after a container
+    restart without rebuilding the image.
+    """
+    raw = os.getenv("ANIWORLD_STO_ENDPOINTS", "").strip()
+    if not raw:
+        return DEFAULT_STO_ENDPOINTS
+
+    endpoints = []
+    for value in raw.split(","):
+        endpoint = _normalise_endpoint(value)
+        if endpoint and endpoint not in endpoints:
+            endpoints.append(endpoint)
+
+    if endpoints:
+        return tuple(endpoints)
+
+    logger.warning(
+        "ANIWORLD_STO_ENDPOINTS contains no valid HTTP(S) origins; using defaults"
+    )
+    return DEFAULT_STO_ENDPOINTS
+
+
+def sto_base_url():
+    """The currently preferred SerienStream origin, including its scheme."""
+    endpoints = sto_endpoints()
+    with _active_lock:
+        active = _active_endpoint
+    return active if active in endpoints else endpoints[0]
 
 
 def sto_host():
-    """The currently preferred serienstream host."""
-    return STO_DOMAINS[_active_idx]
+    """The currently preferred SerienStream host (compatibility helper)."""
+    return urlsplit(sto_base_url()).netloc
 
 
 def sto_rewrite(url):
-    """Rewrite any serienstream URL onto the active host."""
+    """Rewrite any known SerienStream URL onto the active origin."""
     if not url:
         return url
-    return _HOST_RE.sub(r"\1" + sto_host(), url, count=1)
+    if not _HOST_RE.match(url):
+        return url
+
+    parsed = urlsplit(url)
+    target = urlsplit(sto_base_url())
+    return urlunsplit(
+        (target.scheme, target.netloc, parsed.path, parsed.query, parsed.fragment)
+    )
+
+
+def sto_url(path):
+    """Build or rewrite a URL on the currently active SerienStream origin."""
+    if not path:
+        return path
+    if _HOST_RE.match(path):
+        return sto_rewrite(path)
+    return urljoin(f"{sto_base_url()}/", path)
 
 
 def _path_of(url):
-    return _HOST_RE.sub("", url, count=1) or "/"
+    parsed = urlsplit(url)
+    if parsed.scheme and parsed.netloc:
+        return urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
+    return url or "/"
 
 
 def sto_get(url, session=None, timeout=10, **kwargs):
-    """GET a serienstream URL, falling back across domains then the IP.
-
-    Returns the response of the first host that answers; remembers it.
-    """
-    global _active_idx
+    """GET a SerienStream URL and remember the first endpoint that answers."""
+    global _active_endpoint
     session = session or GLOBAL_SESSION
     path = _path_of(url)
     last_err = None
 
-    # Try the configured domains, starting at the last known-good one.
-    for offset in range(len(STO_DOMAINS)):
-        idx = (_active_idx + offset) % len(STO_DOMAINS)
+    endpoints = list(sto_endpoints())
+    with _active_lock:
+        active = _active_endpoint
+    if active in endpoints:
+        endpoints.remove(active)
+        endpoints.insert(0, active)
+
+    for endpoint in endpoints:
         try:
-            resp = session.get(
-                f"https://{STO_DOMAINS[idx]}{path}", timeout=timeout, **kwargs
-            )
+            request_url = f"{endpoint}{path}"
+            resp = session.get(request_url, timeout=timeout, **kwargs)
             resp.raise_for_status()
-            _active_idx = idx
+            with _active_lock:
+                _active_endpoint = endpoint
+            if endpoint != endpoints[0]:
+                logger.warning(f"SerienStream switched to fallback endpoint {endpoint}")
             return resp
         except Exception as exc:
             last_err = exc
 
-    # Last resort: the raw IP with a Host header.
-    try:
-        headers = dict(kwargs.pop("headers", {}) or {})
-        headers.setdefault("Host", STO_DOMAINS[0])
-        return session.get(
-            f"https://{STO_IP}{path}",
-            timeout=timeout,
-            headers=headers,
-            verify=False,
-            **kwargs,
-        )
-    except Exception as exc:
-        last_err = exc
-
-    raise last_err or RuntimeError(f"all serienstream hosts failed for {url}")
+    raise RuntimeError(
+        f"all SerienStream endpoints failed for {url}: {last_err}"
+    ) from last_err

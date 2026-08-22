@@ -25,7 +25,13 @@ Dokploy *Remote Server* and deploy to it.
 
 ```bash
 findmnt /media/jellyfin/storagebox     # should print the fuse.sshfs mount
+touch /media/jellyfin/storagebox/.aniworld-storage
 ```
+
+The second command creates a mount sentinel. Set
+`ANIWORLD_STORAGE_SENTINEL=/media/.aniworld-storage` in Dokploy so a missing
+mount causes startup and healthchecks to fail instead of letting downloads land
+in an empty local mountpoint.
 
 **Use the `Compose` service type, not `Stack`.** Stack is Docker Swarm, which
 ignores `restart: unless-stopped` and cannot build images.
@@ -66,6 +72,9 @@ Dokploy host is too small for that, see
 
    # For scripts and monitoring: openssl rand -hex 32
    ANIWORLD_API_KEY=
+
+   # Recommended for an SSHFS/NFS-backed /media mount.
+   ANIWORLD_STORAGE_SENTINEL=/media/.aniworld-storage
    ```
 
    `.env.example` in the repository root lists everything else. Nothing is
@@ -192,18 +201,17 @@ back as `queued` and carry on — that is what the queue hardening is for.
 Push to the branch Dokploy tracks and hit **Redeploy** (or let the auto-deploy
 webhook do it). Dokploy re-clones the repository and rebuilds.
 
-**Check that a redeploy actually rebuilt.** Plain `docker compose up` reuses an
-existing local image, so if Dokploy's compose command does not pass `--build`,
-a redeploy can start the *old* image from a fresh checkout — the deploy looks
-successful and your changes are simply not in it. Compare the image build time
-against the deploy:
+`pull_policy: build` in `docker-compose.dokploy.yaml` makes this explicit: a
+redeploy rebuilds the local image even if Dokploy invokes Compose without
+`--build`. You can confirm the resulting image timestamp with:
 
 ```bash
 docker image inspect aniworld-downloader:local --format '{{.Created}}'
 ```
 
-If that timestamp is older than your last deploy, set a custom command in the
-Compose service's settings that includes `--build`, and redeploy again.
+If that timestamp is older than your last deploy, the host is using an outdated
+Compose implementation that does not honor the policy. Update Docker Compose,
+or set a custom deploy command that includes `--build`.
 
 The `/config` volume survives redeploys, so the queue, settings and login stay
 put. Back it up as described in [DOCKER.md](DOCKER.md#backup).
@@ -213,8 +221,9 @@ put. Back it up as described in [DOCKER.md](DOCKER.md#backup).
 ## Alternative: a prebuilt image from a registry
 
 Worth it if the Dokploy host is too small to build, or you want the exact same
-image on several machines. Delete the `build:` block from
-`docker-compose.dokploy.yaml` and set `ANIWORLD_IMAGE` in the Environment tab.
+image on several machines. Delete the `build:` block **and the
+`pull_policy: build` line** from `docker-compose.dokploy.yaml`, then set
+`ANIWORLD_IMAGE` in the Environment tab.
 
 ### Build it in GitHub Actions
 
@@ -300,7 +309,12 @@ docker inspect --format '{{json .State.Health}}' "$(docker ps -qf name=aniworld)
 ```
 
 `the download queue worker is not running` means the worker thread died and the
-container is being restarted. `/config/logs/aniworld.log` has the reason.
+entrypoint will exit after three consecutive failures so `restart:
+unless-stopped` can recover it. `/config/logs/aniworld.log` has the reason.
+
+`storage sentinel is missing` means `/media` no longer points at the expected
+SSHFS/NFS filesystem. Restore the mount; the restart loop will recover without
+writing downloads to the host's underlying mountpoint.
 
 **`Connection refused` to Sonarr**
 

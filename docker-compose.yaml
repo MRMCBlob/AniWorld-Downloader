@@ -34,6 +34,11 @@ services:
 
     restart: unless-stopped
 
+    # Reap Chromium/ffmpeg children and avoid Chromium renderer crashes under
+    # Docker's small default /dev/shm allocation.
+    init: true
+    shm_size: "1gb"
+
     # Give a running download time to finish its current ffmpeg mux instead of
     # leaving a half-written file behind.
     stop_grace_period: 60s

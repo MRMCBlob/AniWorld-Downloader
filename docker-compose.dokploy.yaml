@@ -29,6 +29,9 @@ services:
     # tab and delete the `build:` block below — with both present, Compose
     # builds and tags the result as ANIWORLD_IMAGE rather than pulling it.
     image: ${ANIWORLD_IMAGE:-aniworld-downloader:local}
+    # A Dokploy redeploy must rebuild instead of silently reusing the previous
+    # local image tag with a fresh checkout.
+    pull_policy: build
     build:
       context: .
       dockerfile: Dockerfile
@@ -68,6 +71,11 @@ services:
       - "host.docker.internal:host-gateway"
 
     restart: unless-stopped
+
+    # Reap Chromium/ffmpeg children and give Chromium enough shared memory to
+    # avoid renderer crashes under the 64 MiB Docker default.
+    init: true
+    shm_size: "1gb"
 
     # Give a running download time to finish its current ffmpeg mux instead of
     # leaving a half-written file behind.
