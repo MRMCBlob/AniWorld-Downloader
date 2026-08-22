@@ -497,6 +497,22 @@ class DownloadCancelled(Exception):
     """Raised when we killed the download ourselves, not when it failed."""
 
 
+def _ffmpeg_stall_timeout():
+    """Seconds without FFmpeg progress before an attempt is stopped.
+
+    The web worker and the FFmpeg subprocess must honour the same Dokploy
+    setting.  Previously this inner watchdog was hard-coded to 60 seconds, so
+    it killed downloads long before ``ANIWORLD_STALL_TIMEOUT=1800`` could take
+    effect.  Zero disables this inner timer; the outer worker watchdog is also
+    disabled by the same value.
+    """
+    raw = os.getenv("ANIWORLD_STALL_TIMEOUT", "900").strip()
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 900
+
+
 def _run_ffmpeg_with_progress(node, overwrite_output=True, label=""):
     """Run an ffmpeg node and stream its progress output cleanly.
 
@@ -505,9 +521,7 @@ def _run_ffmpeg_with_progress(node, overwrite_output=True, label=""):
     retry logic can kick in.
     """
 
-    STALL_TIMEOUT = (
-        60  # 60 seconds without progress → kill (must exceed reconnect_delay_max=30)
-    )
+    stall_timeout = _ffmpeg_stall_timeout()
 
     debug_mode = os.getenv("ANIWORLD_DEBUG_MODE", "0") == "1"
     is_tty = sys.stderr.isatty()
@@ -585,10 +599,10 @@ def _run_ffmpeg_with_progress(node, overwrite_output=True, label=""):
                     process.kill()
                     break
                 # No new line within 1 s – check the built-in stall timer
-                if time.monotonic() - last_change > STALL_TIMEOUT:
+                if stall_timeout and time.monotonic() - last_change > stall_timeout:
                     logger.warning(
                         "[FFmpeg] Stall detected – no progress for "
-                        f"{STALL_TIMEOUT}s. Killing process."
+                        f"{stall_timeout}s. Killing process."
                     )
                     process.kill()
                     break
@@ -665,10 +679,10 @@ def _run_ffmpeg_with_progress(node, overwrite_output=True, label=""):
                     last_frame = cur_frame
                     last_time = cur_time
                     last_change = time.monotonic()
-                elif time.monotonic() - last_change > STALL_TIMEOUT:
+                elif stall_timeout and time.monotonic() - last_change > stall_timeout:
                     logger.warning(
                         "[FFmpeg] Stall detected – no progress for "
-                        f"{STALL_TIMEOUT}s. Killing process."
+                        f"{stall_timeout}s. Killing process."
                     )
                     process.kill()
                     break
@@ -1183,7 +1197,9 @@ def _download_full_stream(
     hosters that disguise segments with non-media extensions); it opts out for
     normal/encrypted playlists, which then take the FFmpeg path.
     """
-    if ".m3u8" in stream_url.split("?", 1)[0].lower():
+    is_hls = ".m3u8" in stream_url.split("?", 1)[0].lower()
+    if is_hls:
+        input_kwargs = _resilient_hls_input_kwargs(input_kwargs)
         temp_ts = temp_full.with_suffix(".seg.ts")
         try:
             _download_hls_manual(stream_url, headers, temp_ts, ep_label)
@@ -1204,14 +1220,63 @@ def _download_full_stream(
             finally:
                 temp_ts.unlink(missing_ok=True)
 
-    _run_ffmpeg_with_progress(
-        ffmpeg.input(stream_url, **input_kwargs).output(
-            str(temp_full),
-            vcodec=video_codec,
-            acodec="copy",
-            **stream_metadata,
-        ),
-        label=ep_label,
+    try:
+        _run_ffmpeg_with_progress(
+            ffmpeg.input(stream_url, **input_kwargs).output(
+                str(temp_full),
+                vcodec=video_codec,
+                acodec="copy",
+                **stream_metadata,
+            ),
+            label=ep_label,
+        )
+    except RuntimeError as exc:
+        if not is_hls or not _is_corrupt_aac_error(exc):
+            raise
+
+        # VOE occasionally publishes one malformed ADTS packet inside an HLS
+        # audio stream.  Stream-copy feeds that packet to aac_adtstoasc and the
+        # whole mux aborts.  Retry once by decoding/re-encoding audio only;
+        # video remains a stream copy under the default codec setting.
+        temp_full.unlink(missing_ok=True)
+        logger.warning(
+            "[FFmpeg] Corrupt HLS AAC detected; retrying with repaired audio"
+        )
+        repair_metadata = dict(stream_metadata)
+        repair_metadata["af"] = "aresample=async=1:first_pts=0"
+        _run_ffmpeg_with_progress(
+            ffmpeg.input(stream_url, **input_kwargs).output(
+                str(temp_full),
+                vcodec=video_codec,
+                acodec="aac",
+                **repair_metadata,
+            ),
+            label=ep_label,
+        )
+
+
+def _resilient_hls_input_kwargs(input_kwargs):
+    """Return FFmpeg input options that tolerate isolated damaged HLS packets."""
+    options = dict(input_kwargs or {})
+    flags = str(options.get("fflags", ""))
+    for flag in ("discardcorrupt", "genpts"):
+        if flag not in flags:
+            flags += f"+{flag}"
+    options["fflags"] = flags
+    options["err_detect"] = "ignore_err"
+    return options
+
+
+def _is_corrupt_aac_error(error):
+    text = str(error).lower()
+    return any(
+        marker in text
+        for marker in (
+            "aac_adtstoasc",
+            "error parsing adts",
+            "packet corrupt (stream = 1",
+            "corrupt input packet in stream 1",
+        )
     )
 
 

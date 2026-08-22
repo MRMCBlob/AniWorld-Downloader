@@ -7,14 +7,19 @@ from types import SimpleNamespace
 import pytest
 
 from aniworld.models.aniworld_to.episode import AniworldEpisode
+from aniworld.models.common import common as common_module
 from aniworld.models.common.common import (
     DownloadCancelled,
+    _download_full_stream,
+    _ffmpeg_stall_timeout,
     _finalize_resolution_naming,
+    _is_corrupt_aac_error,
     _parse_ffmpeg_time,
     _prepare_resolution_naming,
     _progress_file_name,
     _read_container_resolution,
     _remove_empty_dirs,
+    _resilient_hls_input_kwargs,
     _set_naming_resolution,
     clean_title,
     format_command_for_shell,
@@ -300,6 +305,75 @@ def test_the_snapshot_is_a_copy():
 
 def test_nothing_is_downloading_to_begin_with():
     assert get_ffmpeg_progress()["active"] is False
+
+
+def test_hls_input_drops_corrupt_packets_and_generates_timestamps():
+    options = _resilient_hls_input_kwargs({"reconnect": 1})
+
+    assert options["reconnect"] == 1
+    assert "discardcorrupt" in options["fflags"]
+    assert "genpts" in options["fflags"]
+    assert options["err_detect"] == "ignore_err"
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "[aac_adtstoasc] Error parsing ADTS frame header!",
+        "Packet corrupt (stream = 1, dts = NOPTS)",
+        "corrupt input packet in stream 1",
+    ],
+)
+def test_corrupt_aac_failures_are_recognised(message):
+    assert _is_corrupt_aac_error(RuntimeError(message)) is True
+
+
+def test_unrelated_ffmpeg_failures_do_not_trigger_audio_repair():
+    assert _is_corrupt_aac_error(RuntimeError("HTTP 403 Forbidden")) is False
+
+
+def test_ffmpeg_stall_timeout_uses_the_environment(monkeypatch):
+    monkeypatch.setenv("ANIWORLD_STALL_TIMEOUT", "1800")
+    assert _ffmpeg_stall_timeout() == 1800
+
+    monkeypatch.setenv("ANIWORLD_STALL_TIMEOUT", "0")
+    assert _ffmpeg_stall_timeout() == 0
+
+    monkeypatch.setenv("ANIWORLD_STALL_TIMEOUT", "invalid")
+    assert _ffmpeg_stall_timeout() == 900
+
+
+def test_corrupt_hls_audio_is_reencoded_without_touching_video(monkeypatch, tmp_path):
+    commands = []
+
+    def unsupported(*args, **kwargs):
+        raise common_module._HLSManualUnsupported("standard HLS")
+
+    def run(node, **kwargs):
+        commands.append(common_module.ffmpeg.compile(node))
+        if len(commands) == 1:
+            raise RuntimeError("[aac_adtstoasc] Error parsing ADTS frame header!")
+
+    monkeypatch.setattr(common_module, "_download_hls_manual", unsupported)
+    monkeypatch.setattr(common_module, "_run_ffmpeg_with_progress", run)
+
+    _download_full_stream(
+        "https://cdn.example/master.m3u8",
+        tmp_path / "episode.temp_full.mkv",
+        {"reconnect": 1},
+        {},
+        {"metadata:s:a:0": "language=deu"},
+        "copy",
+        "Episode 1",
+        "deu",
+    )
+
+    assert len(commands) == 2
+    assert "-acodec" in commands[0] and "copy" in commands[0]
+    assert "-acodec" in commands[1] and "aac" in commands[1]
+    assert "-vcodec" in commands[1] and "copy" in commands[1]
+    assert "+discardcorrupt+genpts" in commands[1]
+    assert "aresample=async=1:first_pts=0" in commands[1]
 
 
 # ---------------------------------------------------------------------------

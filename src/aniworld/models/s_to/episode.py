@@ -21,7 +21,13 @@ from ..common.common import (
 from ..common.common import (
     watch as episode_watch,
 )
-from .http import sto_get, sto_rewrite, sto_url
+from .http import (
+    sto_activate,
+    sto_candidate_urls,
+    sto_get,
+    sto_rewrite,
+    sto_url,
+)
 
 
 # -----------------------------
@@ -307,18 +313,46 @@ class SerienstreamEpisode:
                 audio = lang[0] if isinstance(lang, tuple) else lang
                 language_label = _lang_map.get(audio, "Deutsch")
 
-                result = solve_sto_modal(
-                    self.url,
-                    self.selected_provider,
-                    language_label,
-                    redirect_url=self.redirect_url,
-                )
-                self.__provider_url = result if result else resp.url
+                # A direct-IP page can answer ordinary HTTP requests while its
+                # browser challenge fails.  Try the modal on each configured
+                # origin and remember the first one that yields a real external
+                # HTTP(S) provider URL.  ``chrome-error://`` must never reach a
+                # provider extractor as if it were a valid result.
+                self.__provider_url = None
+                episode_candidates = sto_candidate_urls(self.url)
+                redirect_candidates = sto_candidate_urls(self.redirect_url)
+                for episode_url, redirect_url in zip(
+                    episode_candidates, redirect_candidates, strict=True
+                ):
+                    result = solve_sto_modal(
+                        episode_url,
+                        self.selected_provider,
+                        language_label,
+                        redirect_url=redirect_url,
+                    )
+                    parsed_result = urlparse((result or "").strip())
+                    if (
+                        parsed_result.scheme in ("http", "https")
+                        and parsed_result.netloc
+                        and parsed_result.netloc != urlparse(redirect_url).netloc
+                    ):
+                        self.__provider_url = result
+                        sto_activate(episode_url)
+                        self.url = episode_url
+                        self.__redirect_url = redirect_url
+                        break
+                    logger.warning(
+                        "SerienStream browser solve failed on %s; trying fallback",
+                        urlparse(episode_url).netloc,
+                    )
+
+                if self.__provider_url is None:
+                    self.__provider_url = resp.url
 
             parsed_provider = urlparse((self.__provider_url or "").strip())
             redirect_netloc = urlparse(self.redirect_url).netloc
             if (
-                not parsed_provider.scheme
+                parsed_provider.scheme not in ("http", "https")
                 or not parsed_provider.netloc
                 or parsed_provider.netloc == redirect_netloc
             ):

@@ -88,6 +88,34 @@ def sto_base_url():
     return active if active in endpoints else endpoints[0]
 
 
+def _ordered_endpoints():
+    endpoints = list(sto_endpoints())
+    with _active_lock:
+        active = _active_endpoint
+    if active in endpoints:
+        endpoints.remove(active)
+        endpoints.insert(0, active)
+    return tuple(endpoints)
+
+
+def sto_candidate_urls(url):
+    """Return ``url`` rewritten onto every origin in failover order."""
+    path = _path_of(url)
+    return tuple(f"{endpoint}{path}" for endpoint in _ordered_endpoints())
+
+
+def sto_activate(url):
+    """Remember the configured origin used by a successful browser solve."""
+    global _active_endpoint
+    parsed = urlsplit(url)
+    endpoint = urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
+    if endpoint not in sto_endpoints():
+        return False
+    with _active_lock:
+        _active_endpoint = endpoint
+    return True
+
+
 def sto_host():
     """The currently preferred SerienStream host (compatibility helper)."""
     return urlsplit(sto_base_url()).netloc
@@ -140,12 +168,7 @@ def sto_get(url, session=None, timeout=10, **kwargs):
         headers["Accept-Encoding"] = "gzip, deflate"
     kwargs["headers"] = headers
 
-    endpoints = list(sto_endpoints())
-    with _active_lock:
-        active = _active_endpoint
-    if active in endpoints:
-        endpoints.remove(active)
-        endpoints.insert(0, active)
+    endpoints = list(_ordered_endpoints())
 
     for endpoint in endpoints:
         try:

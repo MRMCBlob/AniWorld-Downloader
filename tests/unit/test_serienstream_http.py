@@ -4,8 +4,10 @@ from urllib.parse import urlsplit
 
 import pytest
 
+from aniworld.models.s_to import episode as episode_module
 from aniworld.models.s_to import http
 from aniworld.models.s_to import series as series_module
+from aniworld.models.s_to.episode import SerienstreamEpisode
 from aniworld.models.s_to.series import SerienstreamSeries
 from aniworld.search import query_s_to
 
@@ -97,6 +99,62 @@ def test_active_origin_rewrites_both_scheme_and_host(monkeypatch):
         == "http://186.2.175.5/serie/example?season=1#episodes"
     )
     assert http.sto_url("/r?t=token") == "http://186.2.175.5/r?t=token"
+
+
+def test_browser_candidates_follow_the_same_endpoint_order(monkeypatch):
+    monkeypatch.setattr(http, "_active_endpoint", "https://serienstream.to")
+
+    assert http.sto_candidate_urls("http://186.2.175.5/r?t=token") == (
+        "https://serienstream.to/r?t=token",
+        "http://186.2.175.5/r?t=token",
+        "https://serienstream.cx/r?t=token",
+    )
+
+
+def test_a_successful_browser_origin_becomes_active():
+    assert http.sto_activate("https://serienstream.to/serie/example") is True
+    assert http.sto_base_url() == "https://serienstream.to"
+    assert http.sto_activate("https://untrusted.example/serie/example") is False
+
+
+def test_modal_solver_rejects_chrome_error_and_uses_dns_backup(monkeypatch):
+    episode = SerienstreamEpisode(
+        "http://186.2.175.5/serie/example/staffel-1/episode-1",
+        selected_language="German Dub",
+        selected_provider="VOE",
+    )
+    monkeypatch.setattr(
+        SerienstreamEpisode,
+        "provider_link",
+        lambda self, language, provider: "http://186.2.175.5/r?t=token",
+    )
+
+    class RedirectPage:
+        url = "http://186.2.175.5/r?t=token"
+
+    monkeypatch.setattr(episode_module, "sto_get", lambda url: RedirectPage())
+    attempts = []
+
+    def solve(episode_url, provider, language, redirect_url=None):
+        attempts.append((episode_url, redirect_url))
+        if "186.2.175.5" in episode_url:
+            return "chrome-error://chromewebdata/"
+        return "https://voe.sx/e/working"
+
+    monkeypatch.setattr("aniworld.playwright.captcha.solve_sto_modal", solve)
+
+    assert episode.provider_url == "https://voe.sx/e/working"
+    assert attempts == [
+        (
+            "http://186.2.175.5/serie/example/staffel-1/episode-1",
+            "http://186.2.175.5/r?t=token",
+        ),
+        (
+            "https://serienstream.to/serie/example/staffel-1/episode-1",
+            "https://serienstream.to/r?t=token",
+        ),
+    ]
+    assert http.sto_base_url() == "https://serienstream.to"
 
 
 def test_endpoints_can_be_changed_without_rebuilding(monkeypatch):
