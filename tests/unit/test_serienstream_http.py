@@ -41,31 +41,39 @@ def reset_endpoint(monkeypatch):
     monkeypatch.setattr(http, "_active_endpoint", None)
 
 
-def test_falls_back_to_alternate_domain_and_remembers_it():
-    session = Session(failing={"https://serienstream.to"})
+def test_direct_ip_is_primary_and_serienstream_to_is_remembered_as_backup():
+    session = Session(failing={"http://186.2.175.5"})
 
     response = http.sto_get("https://s.to/serie/example", session=session)
 
-    assert response.url == "https://serienstream.cx/serie/example"
+    assert response.url == "https://serienstream.to/serie/example"
     assert [url for url, _ in session.calls] == [
+        "http://186.2.175.5/serie/example",
         "https://serienstream.to/serie/example",
-        "https://serienstream.cx/serie/example",
     ]
 
     session.calls.clear()
     session.failing.clear()
     http.sto_get("https://serienstream.to/serie/next", session=session)
-    assert session.calls[0][0] == "https://serienstream.cx/serie/next"
+    assert session.calls[0][0] == "https://serienstream.to/serie/next"
 
 
-def test_direct_ip_fallback_uses_http_not_https():
-    session = Session(failing=set(http.DEFAULT_STO_ENDPOINTS[:2]))
+def test_direct_ip_primary_uses_http_not_https():
+    session = Session()
 
     response = http.sto_get("https://serienstream.to/serie/example", session=session)
 
     assert response.url == "http://186.2.175.5/serie/example"
-    assert session.calls[-1][0].startswith("http://186.2.175.5/")
-    assert "verify" not in session.calls[-1][1]
+    assert session.calls[0][0].startswith("http://186.2.175.5/")
+    assert "verify" not in session.calls[0][1]
+
+
+def test_cx_remains_the_last_fallback():
+    session = Session(failing=set(http.DEFAULT_STO_ENDPOINTS[:2]))
+
+    response = http.sto_get("https://serienstream.to/serie/example", session=session)
+
+    assert response.url == "https://serienstream.cx/serie/example"
 
 
 def test_active_origin_rewrites_both_scheme_and_host(monkeypatch):

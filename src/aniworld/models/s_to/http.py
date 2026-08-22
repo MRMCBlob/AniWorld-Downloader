@@ -2,8 +2,8 @@
 
 The public domain has changed more than once. Requests are therefore retried
 against a configurable list of complete base URLs, including the scheme. The
-scheme matters: the direct-IP fallback is HTTP-only, so treating every endpoint
-as HTTPS silently made the last-resort path unusable.
+scheme matters: the preferred direct-IP endpoint is HTTP-only, while the named
+backup domains use HTTPS.
 """
 
 import os
@@ -21,9 +21,9 @@ STO_DOMAINS = ["serienstream.to", "serienstream.cx"]
 STO_IP = "186.2.175.5"
 
 DEFAULT_STO_ENDPOINTS = (
+    f"http://{STO_IP}",
     "https://serienstream.to",
     "https://serienstream.cx",
-    f"http://{STO_IP}",
 )
 
 # Match any known serienstream host so URLs can be rewritten to the active one.
