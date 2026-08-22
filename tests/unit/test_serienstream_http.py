@@ -66,6 +66,19 @@ def test_direct_ip_primary_uses_http_not_https():
     assert response.url == "http://186.2.175.5/serie/example"
     assert session.calls[0][0].startswith("http://186.2.175.5/")
     assert "verify" not in session.calls[0][1]
+    assert session.calls[0][1]["headers"]["Accept-Encoding"] == "gzip, deflate"
+
+
+def test_caller_can_override_accept_encoding():
+    session = Session()
+
+    http.sto_get(
+        "https://serienstream.to/serie/example",
+        session=session,
+        headers={"accept-encoding": "identity"},
+    )
+
+    assert session.calls[0][1]["headers"] == {"accept-encoding": "identity"}
 
 
 def test_cx_remains_the_last_fallback():

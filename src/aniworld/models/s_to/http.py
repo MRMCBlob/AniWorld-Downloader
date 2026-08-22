@@ -130,6 +130,16 @@ def sto_get(url, session=None, timeout=10, **kwargs):
     path = _path_of(url)
     last_err = None
 
+    # ddos-guard advertises Brotli to browser-like clients. The lightweight
+    # HTTP stack in the Linux image does not include an optional Brotli decoder
+    # and otherwise exposes compressed bytes through Response.text, making all
+    # HTML extraction fail even though the request returned HTTP 200. Gzip and
+    # deflate are decoded natively. Preserve an explicit caller override.
+    headers = dict(kwargs.get("headers") or {})
+    if not any(name.lower() == "accept-encoding" for name in headers):
+        headers["Accept-Encoding"] = "gzip, deflate"
+    kwargs["headers"] = headers
+
     endpoints = list(sto_endpoints())
     with _active_lock:
         active = _active_endpoint
