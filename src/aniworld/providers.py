@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Pattern, Type
+from re import Pattern
 from urllib.parse import urlparse, urlunparse
 
 from .config import (
@@ -15,9 +15,6 @@ from .config import (
     CINEBY_SERIES_PATTERN,
     FILMPALAST_SERIES_PATTERN,
     HANIME_TV_SERIES_PATTERN,
-    HIANIME_EPISODE_PATTERN,
-    HIANIME_SEASON_PATTERN,
-    HIANIME_SERIES_PATTERN,
     KINOX_SERIES_PATTERN,
     MANGA_FIRE_CHAPTER_PATTERN,
     MANGA_FIRE_SERIES_PATTERN,
@@ -40,9 +37,6 @@ from .models import (
     HanimeTVEpisode,
     HanimeTVSeason,
     HanimeTVSeries,
-    HiAnimeEpisode,
-    HiAnimeSeason,
-    HiAnimeSeries,
     KinoxEpisode,
     KinoxSeason,
     KinoxSeries,
@@ -58,13 +52,13 @@ from .models import (
 @dataclass(frozen=True)
 class Provider:
     name: str
-    series_pattern: Optional[Pattern[str]] = None
-    season_pattern: Optional[Pattern[str]] = None
-    episode_pattern: Optional[Pattern[str]] = None
+    series_pattern: Pattern[str] | None = None
+    season_pattern: Pattern[str] | None = None
+    episode_pattern: Pattern[str] | None = None
 
-    series_cls: Optional[Type] = None
-    season_cls: Optional[Type] = None
-    episode_cls: Optional[Type] = None
+    series_cls: type | None = None
+    season_cls: type | None = None
+    episode_cls: type | None = None
 
 
 PROVIDERS = [
@@ -143,15 +137,6 @@ PROVIDERS = [
         series_cls=SerienstreamSeries,
         season_cls=SerienstreamSeason,
         episode_cls=SerienstreamEpisode,
-    ),
-    Provider(
-        name="HiAnime",
-        series_pattern=HIANIME_SERIES_PATTERN,
-        season_pattern=HIANIME_SEASON_PATTERN,
-        episode_pattern=HIANIME_EPISODE_PATTERN,
-        series_cls=HiAnimeSeries,
-        season_cls=HiAnimeSeason,
-        episode_cls=HiAnimeEpisode,
     ),
 ]
 

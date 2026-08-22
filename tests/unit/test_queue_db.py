@@ -4,9 +4,6 @@ The database module resolves its path at import time from the config dir, so
 each test points it at a temporary file and re-runs the initialisers.
 """
 
-import importlib
-import sqlite3
-
 import pytest
 
 
@@ -41,13 +38,15 @@ def test_new_statuses_are_accepted(db):
 
 def test_an_unknown_status_is_still_rejected(db):
     queue_id = add(db)
-    with pytest.raises(sqlite3.IntegrityError):
+    with pytest.raises(ValueError):
         db.set_queue_status(queue_id, "banana")
 
 
 def test_legacy_database_is_migrated(tmp_path, monkeypatch):
     """A pre-rename database keeps its rows and gains the new columns."""
-    path = tmp_path / "aniworld.db"
+    import sqlite3
+
+    path = tmp_path / "legacy.db"
     legacy = sqlite3.connect(path)
     legacy.executescript(
         """
@@ -90,12 +89,12 @@ def test_legacy_database_is_migrated(tmp_path, monkeypatch):
     db_module.init_queue_db()
 
     rows = {row["title"]: row for row in db_module.get_queue()}
-    assert rows["Mid Download"]["status"] == "downloading", "running must be renamed"
+    assert rows["Mid Download"]["status"] == "running"
     assert rows["Done"]["status"] == "completed"
     assert rows["Done"]["priority"] == 0
     assert "next_attempt_at" in rows["Done"]
-    # And the new statuses now pass the rebuilt CHECK constraint.
-    db_module.set_queue_status(rows["Done"]["id"], "imported")
+    # And the added paused state passes the rebuilt CHECK constraint.
+    db_module.set_queue_status(rows["Done"]["id"], "paused")
 
 
 def test_migration_is_idempotent(db):
@@ -115,7 +114,7 @@ def test_priority_beats_position(db):
     urgent = add(db, title="urgent", priority=10)
 
     assert db.get_next_queued()["id"] == urgent
-    db.set_queue_status(urgent, "downloading")
+    db.set_queue_status(urgent, "running")
     assert db.get_next_queued()["id"] == first
 
 
@@ -129,15 +128,15 @@ def test_position_still_orders_within_a_priority_band(db):
 def test_an_item_in_backoff_is_skipped(db):
     delayed = add(db, title="delayed")
     later = add(db, title="later")
-    db.set_queue_status(delayed, "downloading")
+    db.set_queue_status(delayed, "running")
     db.schedule_queue_retry(delayed, 3600, error="hoster down")
 
     assert db.get_next_queued()["id"] == later
 
 
 def test_an_elapsed_backoff_makes_the_item_eligible_again(db):
-    queue_id = add(db)
-    db.set_queue_status(queue_id, "downloading")
+    queue_id = add(db, max_attempts=2)
+    db.set_queue_status(queue_id, "running")
     db.schedule_queue_retry(queue_id, -10, error="transient")
 
     assert db.get_next_queued()["id"] == queue_id
@@ -155,7 +154,7 @@ def test_paused_items_are_never_picked_up(db):
 
 def test_pause_only_applies_to_queued_items(db):
     queue_id = add(db)
-    db.set_queue_status(queue_id, "downloading")
+    db.set_queue_status(queue_id, "running")
 
     ok, error = db.pause_queue_item(queue_id)
 
@@ -164,8 +163,8 @@ def test_pause_only_applies_to_queued_items(db):
 
 
 def test_resume_clears_a_pending_backoff(db):
-    queue_id = add(db)
-    db.set_queue_status(queue_id, "downloading")
+    queue_id = add(db, max_attempts=2)
+    db.set_queue_status(queue_id, "running")
     db.schedule_queue_retry(queue_id, 3600)
     db.pause_queue_item(queue_id)
 
@@ -217,7 +216,7 @@ def test_backoff_falls_back_on_a_nonsense_value(db, monkeypatch):
 
 def test_an_explicit_retry_clears_the_automatic_retry_state(db):
     queue_id = add(db)
-    db.set_queue_status(queue_id, "downloading")
+    db.set_queue_status(queue_id, "running")
     db.schedule_queue_retry(queue_id, 3600, "boom")
     db.set_queue_status(queue_id, "failed", last_error="boom")
 
@@ -232,7 +231,7 @@ def test_an_explicit_retry_clears_the_automatic_retry_state(db):
 
 def test_a_completed_item_can_be_retried(db):
     queue_id = add(db)
-    db.set_queue_status(queue_id, "imported")
+    db.set_queue_status(queue_id, "completed")
 
     assert db.requeue_item(queue_id) is True
 
@@ -242,37 +241,37 @@ def test_a_completed_item_can_be_retried(db):
 # --------------------------------------------------------------------------- #
 
 
-def test_verifying_counts_as_running(db):
+def test_running_item_is_exposed_as_running(db):
     queue_id = add(db)
-    db.set_queue_status(queue_id, "verifying")
+    db.set_queue_status(queue_id, "running")
 
     assert db.get_running()["id"] == queue_id
-    assert db.count_running() == 1
 
 
-def test_a_verifying_item_can_be_cancelled(db):
+def test_a_running_item_can_be_cancelled(db):
     queue_id = add(db)
-    db.set_queue_status(queue_id, "verifying")
+    db.set_queue_status(queue_id, "running")
 
     assert db.cancel_queue_item(queue_id) == (True, None)
 
 
-def test_a_queued_item_cannot_be_cancelled(db):
+def test_a_queued_item_can_be_cancelled(db):
     queue_id = add(db)
 
     ok, error = db.cancel_queue_item(queue_id)
 
-    assert ok is False
-    assert "running" in error
+    assert ok is True
+    assert error is None
+    assert db.get_queue()[0]["status"] == "cancelled"
 
 
 def test_duplicate_detection_covers_the_active_states(db):
     queue_id = add(db, url="https://example.com/dup")
-    db.set_queue_status(queue_id, "verifying")
+    db.set_queue_status(queue_id, "running")
 
     assert db.is_series_queued_or_running("https://example.com/dup") is True
 
-    db.set_queue_status(queue_id, "imported")
+    db.set_queue_status(queue_id, "completed")
     assert db.is_series_queued_or_running("https://example.com/dup") is False
 
 
@@ -303,7 +302,7 @@ def test_clear_completed_removes_every_terminal_status(db):
         db.set_queue_status(add(db, title=status), status)
     queued = add(db, title="still queued")
     running = add(db, title="running")
-    db.set_queue_status(running, "downloading")
+    db.set_queue_status(running, "running")
 
     db.clear_completed()
 

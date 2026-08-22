@@ -80,7 +80,16 @@ def parse_path_map(raw=None):
         chunk = chunk.strip()
         if not chunk or ":" not in chunk:
             continue
-        ours, _, theirs = chunk.partition(":")
+        # Prefer the separator immediately before a POSIX target. This keeps a
+        # Windows drive prefix (``C:\\...:/data``) intact when the test suite or
+        # a remote-control client prepares a mapping for a Linux Arr service.
+        separator = chunk.rfind(":/")
+        if separator > 1:
+            ours, theirs = chunk[:separator], chunk[separator + 1 :]
+        else:
+            ours, _, theirs = chunk.partition(":")
+        ours = ours.replace("\\", "/")
+        theirs = theirs.replace("\\", "/")
         ours, theirs = ours.strip().rstrip("/"), theirs.strip().rstrip("/")
         if ours and theirs:
             pairs.append((ours, theirs))
@@ -100,7 +109,7 @@ def map_path(path, path_map=None):
         return None
     if path_map is None:
         path_map = parse_path_map()
-    text = str(path)
+    text = str(path).replace("\\", "/")
     for ours, theirs in path_map:
         if text == ours:
             return theirs
@@ -115,7 +124,7 @@ def unmap_path(path, path_map=None):
         return None
     if path_map is None:
         path_map = parse_path_map()
-    text = str(path)
+    text = str(path).replace("\\", "/")
     for ours, theirs in path_map:
         if text == theirs:
             return ours
@@ -367,12 +376,21 @@ def relative_folder(file_path, root):
     containing the file. Falling back to ``root`` keeps behaviour sane if the
     file somehow sits outside it.
     """
-    file_path = Path(file_path)
-    root = Path(root) if root else None
-    parent = file_path.parent
+    raw_file = str(file_path)
+    raw_root = str(root) if root else None
+    # Integration APIs use Linux/container paths even when their tests or a
+    # remote-control client run on Windows. pathlib.Path would rewrite those
+    # slashes before the configured /media:/data mapping gets a chance.
+    if raw_file.startswith("/"):
+        parent = PurePosixPath(raw_file).parent
+        root = PurePosixPath(raw_root) if raw_root else None
+    else:
+        file_path = Path(raw_file)
+        parent = file_path.parent
+        root = Path(raw_root) if raw_root else None
     if root is not None:
         try:
-            PurePosixPath(parent).relative_to(PurePosixPath(root))
+            parent.relative_to(root)
         except ValueError:
             return str(root)
     return str(parent)

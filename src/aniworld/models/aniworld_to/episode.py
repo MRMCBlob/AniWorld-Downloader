@@ -1,6 +1,7 @@
 import os
 import re
 from collections import defaultdict
+from html import unescape
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -206,6 +207,7 @@ class AniworldEpisode:
                     season=f"{self.season.season_number:02d}",
                     episode=f"{self.episode_number:03d}",
                     language=self.selected_language,
+                    resolution=getattr(self, "_resolution", "unknown"),
                 )
                 self.__base_folder = Path(self.selected_path) / folder_str
         return self.__base_folder
@@ -226,6 +228,7 @@ class AniworldEpisode:
                     season=f"{self.season.season_number:02d}",
                     episode=f"{self.episode_number:03d}",
                     language=self.selected_language,
+                    resolution=getattr(self, "_resolution", "unknown"),
                 )
                 self.__folder_path = self._base_folder / folder_str
         return self.__folder_path
@@ -250,6 +253,7 @@ class AniworldEpisode:
             file_template = file_template.replace("%season%", "{season}")
             file_template = file_template.replace("%episode%", "{episode}")
             file_template = file_template.replace("%language%", "{language}")
+            file_template = file_template.replace("%resolution%", "{resolution}")
 
             self.__file_name = file_template.format(
                 title=self.series.title_cleaned,
@@ -258,6 +262,7 @@ class AniworldEpisode:
                 season=f"{self.season.season_number:02d}",
                 episode=f"{self.episode_number:03d}",
                 language=self.selected_language,
+                resolution=getattr(self, "_resolution", "unknown"),
             )
         return self.__file_name
 
@@ -477,7 +482,7 @@ class AniworldEpisode:
         )
 
         if german_match:
-            return german_match.group(1).strip()
+            return unescape(german_match.group(1)).strip()
 
         return None
 
@@ -498,7 +503,7 @@ class AniworldEpisode:
             r'<small[^>]*class="episodeEnglishTitle"[^>]*>([^<]*)', html
         )
         if english_match:
-            return english_match.group(1).strip()
+            return unescape(english_match.group(1)).strip()
 
         return None
 
@@ -529,7 +534,7 @@ class AniworldEpisode:
             language = self.selected_language
         language = self._normalize_language(language)
         provider_dict = self.__provider_dict_for_language(language)
-        return tuple(provider_dict.keys()) if provider_dict else tuple()
+        return tuple(provider_dict.keys()) if provider_dict else ()
 
     def provider_attempt_order(self):
         return build_provider_attempt_order(
@@ -552,7 +557,7 @@ class AniworldEpisode:
         if not (isinstance(language, tuple) and len(language) == 2):
             return None
 
-        for key in self.provider_data._data.keys():
+        for key in self.provider_data._data:
             if key[0].value == language[0].value and key[1].value == language[1].value:
                 return self.provider_data._data[key]
 

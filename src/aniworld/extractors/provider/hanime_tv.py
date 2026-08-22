@@ -14,11 +14,19 @@ import niquests
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 try:
-    from ...config import DEFAULT_USER_AGENT, logger
-    from ...playwright.captcha import playwright_get_hanime_manifest_token
+    from ...config import DEFAULT_USER_AGENT, GLOBAL_SESSION, logger
+    from ...playwright.captcha import (
+        is_captcha_page,
+        playwright_get_hanime_manifest_token,
+        solve_captcha,
+    )
 except ImportError:
-    from aniworld.config import DEFAULT_USER_AGENT, logger
-    from aniworld.playwright.captcha import playwright_get_hanime_manifest_token
+    from aniworld.config import DEFAULT_USER_AGENT, GLOBAL_SESSION, logger
+    from aniworld.playwright.captcha import (
+        is_captcha_page,
+        playwright_get_hanime_manifest_token,
+        solve_captcha,
+    )
 
 
 HANIME_BASE_URL = "https://hanime.tv"
@@ -29,6 +37,7 @@ HANIME_TRENDING_URL = f"{HANIME_BASE_URL}/browse/trending"
 _HANIME_HEADERS = {
     "User-Agent": DEFAULT_USER_AGENT,
     "Referer": f"{HANIME_BASE_URL}/",
+    "Accept-Encoding": "gzip, deflate",
 }
 _HANIME_AES_KEY = bytes.fromhex(
     "5d657a4dcb0bad1c637ff2e221059b10ff17ae39fe855003e846918941f4ebe3"
@@ -268,9 +277,22 @@ def _build_synthetic_payload(slug, html):
 
 def _request_hanime(url, *, timeout=20):
     last_error = None
+    challenged = False
     for attempt in range(_HANIME_REQUEST_ATTEMPTS):
         try:
-            response = niquests.get(url, headers=_HANIME_HEADERS, timeout=timeout)
+            headers = {
+                **_HANIME_HEADERS,
+                "User-Agent": GLOBAL_SESSION.headers.get(
+                    "User-Agent", DEFAULT_USER_AGENT
+                ),
+            }
+            response = GLOBAL_SESSION.get(url, headers=headers, timeout=timeout)
+            response.encoding = "utf-8"
+            body = response.text or ""
+            if not challenged and is_captcha_page(body, response.status_code):
+                challenged = True
+                solve_captcha(url)
+                continue
             response.raise_for_status()
             return response
         except Exception as exc:
@@ -310,25 +332,20 @@ def _parse_hanime_manifest_token(token):
         raise ValueError("Invalid Hanime handshake token") from exc
 
     if not isinstance(manifest, dict) or not isinstance(manifest.get("sources"), list):
-        raise ValueError("Hanime handshake did not contain video sources")
+        raise TypeError("Hanime handshake did not contain video sources")
     return manifest
 
 
 def fetch_hanime_manifest(slug):
     """Resolve a fresh stream manifest through Hanime's own web player."""
     page_url = HANIME_VIDEO_URL.format(slug=slug)
-    last_error = None
-    for attempt in range(2):
-        try:
-            token = playwright_get_hanime_manifest_token(page_url, timeout=15)
-            if not token:
-                raise TimeoutError("Hanime handshake returned no X-Token")
-            return _parse_hanime_manifest_token(token)
-        except Exception as exc:
-            last_error = exc
-            if attempt == 0:
-                time.sleep(0.5)
-    raise RuntimeError(f"Hanime stream handshake failed: {last_error}") from last_error
+    try:
+        token = playwright_get_hanime_manifest_token(page_url, timeout=15)
+        if not token:
+            raise TimeoutError("Hanime handshake returned no X-Token")
+        return _parse_hanime_manifest_token(token)
+    except Exception as exc:
+        raise RuntimeError(f"Hanime stream handshake failed: {exc}") from exc
 
 
 def _manifest_sources(manifest):
@@ -368,7 +385,7 @@ def get_direct_link_from_hanime_tv(api_data, refresh=False):
 
 def get_download_url_from_hanime_tv(api_data):
     """Hanime-only mode deliberately does not use third-party file mirrors."""
-    return None
+    return
 
 
 def _parse_sitemap_slugs(xml_text):

@@ -1,9 +1,10 @@
 [project]
 name = "aniworld"
-version = "4.8.6"
+version = "5.0.2"
 authors = [{ name = "Phoenixthrush UwU", email = "contact@phoenixthrush.com" }]
 maintainers = [
   { name = "Phoenixthrush UwU", email = "contact@phoenixthrush.com" },
+  { name = "Sirox", email = "iloveshell@proton.me"}
 ]
 description = "AniWorld-Downloader is a command-line tool for downloading and streaming movies and series."
 readme = "README.md"
@@ -41,12 +42,12 @@ sso = [
 discord = [
   "discord.py",                                                               # optional Discord request bot
 ]
+test = [
+  "pytest",
+]
 all = [
   "authlib",
   "discord.py",
-]
-dev = [
-  "pytest",                                                                   # offline unit tests, see tests/README.md
 ]
 
 
@@ -75,14 +76,26 @@ aniworld = [
   "web/static/*.png",
   "web/static/*.webp",
   "web/static/flags/*.svg",
+  "web/static/flags/LICENSE.txt",
   "browsers.jsonl",
 ]
 
 [project.scripts]
 aniworld = "aniworld.__main__:main"
 
+[tool.ruff.lint.per-file-ignores]
+# schedule.py works on naive wall-clock datetimes by design: that is what keeps
+# a cron line at 22:00 across a DST switch. Its tests build them by hand, so the
+# "always pass a timezone" rule does not apply to them.
+"tests/test_schedule.py" = ["DTZ001"]
+# Both set an environment variable that has to be in place before aniworld is
+# imported, so their imports cannot all sit at the top of the file.
+"tests/autosync_simulation.py" = ["E402"]
+"tests/conftest.py" = ["E402"]
+
 [tool.pytest.ini_options]
-# Only the offline unit tests run by default. tests/test_aniworld_models.py and
-# tests/test_aniworld_providers.py hit the live sites and are opt-in:
-#   pytest tests/test_aniworld_models.py
-testpaths = ["tests/unit"]
+testpaths = ["tests"]
+# The two legacy scripts in tests/ are manual smoke checks against the live
+# sites. They expose no test functions, so pytest collects nothing from them.
+python_files = ["test_*.py"]
+addopts = "--strict-markers"

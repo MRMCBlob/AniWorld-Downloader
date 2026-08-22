@@ -7,7 +7,6 @@ import subprocess
 import sys
 import zipfile
 from pathlib import Path
-from typing import List, Optional
 
 PLATFORM = platform.system()
 
@@ -78,7 +77,7 @@ def get_ffmpeg_windows_url() -> str:
 # -----------------------------
 # Syncplay
 # -----------------------------
-def get_syncplay_release_url() -> List[str]:
+def get_syncplay_release_url() -> list[str]:
     """Fetch the URLs for the latest Windows Syncplay portable ZIP release."""
     repo = "Syncplay/syncplay"
     portable_pattern = r"Syncplay[_-]\d+(?:\.\d+)*_Portable\.zip$"
@@ -128,6 +127,20 @@ deps = {
 
 
 # -----------------------------
+# Auto-install kill switch
+# -----------------------------
+def auto_install_disabled() -> bool:
+    """True when ANIWORLD_NO_AUTO_INSTALL=1.
+
+    Blocks every unattended download/install the app would otherwise do on its
+    own: the portable binaries, the system package manager (which shells out to
+    sudo), Xvfb and the patchright Chromium. Anything already installed is
+    still used normally.
+    """
+    return os.getenv("ANIWORLD_NO_AUTO_INSTALL", "0").strip() == "1"
+
+
+# -----------------------------
 # Dependency Manager
 # -----------------------------
 class DependencyManager:
@@ -157,7 +170,7 @@ class DependencyManager:
 
     def _find_binary_in_dir(
         self, search_dir: Path, binary_names: list[str]
-    ) -> Optional[Path]:
+    ) -> Path | None:
         for binary_name in binary_names:
             direct_match = search_dir / binary_name
             if direct_match.exists():
@@ -172,7 +185,7 @@ class DependencyManager:
 
         return None
 
-    def _find_binary_on_path(self, name: str, dep_info: dict) -> Optional[Path]:
+    def _find_binary_on_path(self, name: str, dep_info: dict) -> Path | None:
         binary_names = [name, *(dep_info.get("binary_names") or [])]
 
         for binary_name in dict.fromkeys(binary_names):
@@ -182,7 +195,7 @@ class DependencyManager:
 
         return None
 
-    def _find_local_binary(self, name: str, dep_info: dict) -> Optional[Path]:
+    def _find_local_binary(self, name: str, dep_info: dict) -> Path | None:
         binary_names = dep_info.get("binary_names") or [name]
         binary_path = self._find_binary_in_dir(self.install_folder, binary_names)
         if binary_path:
@@ -217,6 +230,10 @@ class DependencyManager:
         raise ValueError(f"Unsupported archive format: {archive_path}")
 
     def _confirm_install(self, message: str, default: bool = True) -> bool:
+        if auto_install_disabled():
+            self.logger.debug(f"ANIWORLD_NO_AUTO_INSTALL=1 — skipping: {message}")
+            return False
+
         if not sys.stdin or not sys.stdin.isatty():
             return False
 
@@ -226,7 +243,7 @@ class DependencyManager:
             return default
         return reply in {"y", "yes"}
 
-    def _resolve_download_url(self, name: str, dep_info: dict) -> Optional[str]:
+    def _resolve_download_url(self, name: str, dep_info: dict) -> str | None:
         url = dep_info.get("url")
 
         if name == "mpv" and PLATFORM == "Windows" and not url:
@@ -250,8 +267,7 @@ class DependencyManager:
         resp = GLOBAL_SESSION.get(url, stream=True)
         resp.raise_for_status()
         with open(local_path, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=8192):
-                f.write(chunk)
+            f.writelines(resp.iter_content(chunk_size=8192))
 
         if PLATFORM != "Windows":
             local_path.chmod(0o755)
@@ -260,9 +276,7 @@ class DependencyManager:
         resolved_binary = self._resolve_local_binary(name, dep_info, local_path)
         return resolved_binary or local_path
 
-    def _resolve_local_binary(
-        self, name: str, dep_info: dict, local_path: Optional[Path]
-    ):
+    def _resolve_local_binary(self, name: str, dep_info: dict, local_path: Path | None):
         if not local_path or not local_path.exists():
             return None
 
@@ -321,15 +335,14 @@ class DependencyManager:
         package_error = None
         portable_error = None
 
-        if url:
-            if self._confirm_install(
-                f"{name} was not found on PATH. Install a portable copy into {self.install_folder} for this runtime?"
-            ):
-                try:
-                    return self._download_binary(name, dep_info, url)
-                except Exception as exc:
-                    portable_error = exc
-                    self.logger.warning(f"Portable install failed for {name}: {exc}")
+        if url and self._confirm_install(
+            f"{name} was not found on PATH. Install a portable copy into {self.install_folder} for this runtime?"
+        ):
+            try:
+                return self._download_binary(name, dep_info, url)
+            except Exception as exc:
+                portable_error = exc
+                self.logger.warning(f"Portable install failed for {name}: {exc}")
 
         pkg_name = dep_info.get("package")
         if pkg_name and self._confirm_install(
@@ -360,6 +373,12 @@ class DependencyManager:
         raise FileNotFoundError(install_hint)
 
     def _install_with_package_manager(self, name: str) -> bool:
+        if auto_install_disabled():
+            self.logger.debug(
+                f"ANIWORLD_NO_AUTO_INSTALL=1 — not installing {name} via package manager"
+            )
+            return False
+
         dep_info = self.deps.get(name, {}).get(PLATFORM, {})
         pkg_name = dep_info.get("package")
         if not pkg_name:
@@ -425,12 +444,15 @@ def _ensure_xvfb():
         return
     _log = get_logger(__name__)
     if _in_docker():
-        # The image installs Xvfb and the entrypoint starts it. Reaching here
-        # means DISPLAY was unset, and the apt-get path below cannot work
-        # unprivileged anyway.
-        _log.warning("No DISPLAY set in the container — is the entrypoint running Xvfb?")
+        _log.warning("No DISPLAY in the container; check the image entrypoint")
         return
     if not shutil.which("Xvfb"):
+        if auto_install_disabled():
+            _log.warning(
+                "Xvfb not found and ANIWORLD_NO_AUTO_INSTALL=1 — install it yourself "
+                "(e.g. 'sudo apt install xvfb') or set DISPLAY to an existing X server."
+            )
+            return
         _log.info("Xvfb not found — installing via apt...")
         try:
             subprocess.run(
@@ -467,12 +489,6 @@ def _default_playwright_browsers_path() -> Path:
 
 
 def _browser_registry_dir(driver_cli: str) -> Path:
-    """The directory patchright downloads its browsers into.
-
-    Mirrors the driver's own resolution: PLAYWRIGHT_BROWSERS_PATH wins, the
-    literal "0" means "next to the driver package", and anything else falls
-    back to the platform cache directory.
-    """
     configured = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
     if configured == "0":
         return Path(driver_cli).parent / ".local-browsers"
@@ -481,89 +497,67 @@ def _browser_registry_dir(driver_cli: str) -> Path:
     return _default_playwright_browsers_path()
 
 
-def _expected_browser_dirs(registry_dir: Path, driver_cli: str) -> List[Path]:
-    """Where the Chromium builds this patchright version wants would live.
+def _expected_browser_dirs(registry_dir: Path, driver_cli: str) -> list[Path]:
+    """Chromium revisions this patchright driver expects.
 
-    The revisions come from the driver's own browsers.json, so an upgraded
-    patchright asks for a build the previous one never downloaded and the
-    install is correctly attempted again. Both builds are checked: the captcha
-    solver runs headed (chromium) and the stream sniffers run headless, which
-    Playwright serves from the separate headless-shell build.
+    Upstream v5 intentionally installs ``--no-shell``, so only headed Chromium
+    is required; requiring the separate headless shell would trigger a download
+    on every desktop start even though this application never installed it.
     """
-    browsers_json = Path(driver_cli).parent / "browsers.json"
     try:
-        with open(browsers_json, encoding="utf-8") as fh:
+        with open(Path(driver_cli).parent / "browsers.json", encoding="utf-8") as fh:
             descriptors = json.load(fh).get("browsers", [])
     except (OSError, ValueError):
         return []
-
-    wanted = {"chromium", "chromium-headless-shell"}
-    dirs = []
-    for descriptor in descriptors:
-        name = descriptor.get("name")
-        revision = descriptor.get("revision")
-        if name in wanted and revision:
-            # The driver swaps dashes for underscores so that one browser name
-            # can never be read as a prefix of another.
-            dirs.append(registry_dir / f"{name.replace('-', '_')}-{revision}")
-    return dirs
+    return [
+        registry_dir / f"chromium-{item['revision']}"
+        for item in descriptors
+        if item.get("name") == "chromium" and item.get("revision")
+    ]
 
 
 def _chromium_is_installed(registry_dir: Path, driver_cli: str) -> bool:
-    """Whether every expected build is present and fully downloaded.
-
-    INSTALLATION_COMPLETE is the marker the driver itself writes last, so a
-    half-finished download does not read as installed.
-    """
     expected = _expected_browser_dirs(registry_dir, driver_cli)
-    if not expected:
-        return False
-    return all((path / "INSTALLATION_COMPLETE").exists() for path in expected)
+    return bool(expected) and all(
+        (path / "INSTALLATION_COMPLETE").exists() for path in expected
+    )
 
 
 def _writable_target(registry_dir: Path) -> bool:
-    """Whether an install could create or extend the registry directory.
-
-    Walks up to the nearest existing ancestor, because the usual case on a
-    fresh machine is that none of the directory exists yet.
-    """
     candidate = registry_dir
     while True:
         if candidate.exists():
             return os.access(candidate, os.W_OK | os.X_OK)
-        parent = candidate.parent
-        if parent == candidate:
+        if candidate.parent == candidate:
             return False
-        candidate = parent
+        candidate = candidate.parent
 
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
 
 
 def _tail(output: str, limit: int = 1200) -> str:
-    """The useful end of the driver's output, condensed into one log line.
-
-    The driver colours everything and retries a failing download three times,
-    so the raw text is mostly escape codes and repeats. Dropping both leaves
-    room for the part that names the actual cause.
-    """
-    lines: List[str] = []
+    lines = []
     seen = set()
     for line in _ANSI_RE.sub("", output).splitlines():
         line = line.strip()
         if line and line not in seen:
             seen.add(line)
             lines.append(line)
-
     text = " | ".join(lines)
-    if len(text) <= limit:
-        return text
-    return "..." + text[-limit:]
+    return text if len(text) <= limit else "..." + text[-limit:]
 
 
 def ensure_patchright_chromium():
     """Install the patchright Chromium browser if not already present."""
     _log = get_logger(__name__)
+    if auto_install_disabled():
+        _log.debug("ANIWORLD_NO_AUTO_INSTALL=1 — skipping chromium/Xvfb setup")
+        return
+    if _in_docker():
+        _log.debug("Using Chromium preinstalled in the container image")
+        return
+
     try:
         import patchright  # noqa: F401
     except ImportError:
@@ -571,15 +565,6 @@ def ensure_patchright_chromium():
         return
 
     _ensure_xvfb()
-
-    if _in_docker():
-        # The image already contains Chromium under PLAYWRIGHT_BROWSERS_PATH,
-        # and that directory is root-owned and read-only for the app user, so
-        # an install here can only ever fail. Callers guard this too; keeping
-        # the check here means the CLI path inside a container is safe as well.
-        _log.debug("Running in a container — using the preinstalled Chromium")
-        return
-
     try:
         from patchright._impl._driver import compute_driver_executable, get_driver_env
 
@@ -595,28 +580,26 @@ def ensure_patchright_chromium():
         if PLATFORM != "Windows" and not os.access(driver_path, os.X_OK):
             driver_path.chmod(driver_path.stat().st_mode | 0o111)
 
-        # Ask the filesystem before shelling out. The install is a node process
-        # that re-downloads nothing when the browser is already there, but it
-        # still costs a second of startup, and in an image that ships Chromium
-        # under a read-only path it is the failure this whole function used to
-        # log on every single start.
         registry_dir = _browser_registry_dir(driver_cli)
         if _chromium_is_installed(registry_dir, driver_cli):
             _log.debug(f"patchright chromium already present in {registry_dir}")
             return
-
         if not _writable_target(registry_dir):
             _log.warning(
                 f"Chromium is missing from {registry_dir} and that directory is "
-                "not writable, so it cannot be installed. Point "
-                "PLAYWRIGHT_BROWSERS_PATH at a writable directory, or run "
-                "'patchright install chromium' as the user owning that one."
+                "not writable; set PLAYWRIGHT_BROWSERS_PATH to a writable path"
             )
             return
 
         _log.debug("Installing patchright chromium (this may take a moment)...")
         result = subprocess.run(
-            [driver_path.as_posix(), driver_cli, "install", "chromium"],
+            [
+                driver_path.as_posix(),
+                driver_cli,
+                "install",
+                "chromium",
+                "--no-shell",
+            ],
             check=False,
             env=get_driver_env(),
             stdout=subprocess.PIPE,
@@ -625,8 +608,6 @@ def ensure_patchright_chromium():
             errors="replace",
         )
         if result.returncode != 0:
-            # The output is the only thing that says *why* — a bare exit status
-            # is not something anyone can act on from a log file.
             _log.warning(
                 f"patchright chromium install failed (exit {result.returncode}): "
                 f"{_tail(result.stdout or '')}"

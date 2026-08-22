@@ -16,7 +16,9 @@ def make_client(handlers):
 
 
 def test_auth_uses_the_mediabrowser_authorization_header():
-    client, session = make_client({("GET", "/System/Info"): FakeResponse(200, {"Version": "10.11"})})
+    client, session = make_client(
+        {("GET", "/System/Info"): FakeResponse(200, {"Version": "10.11"})}
+    )
 
     client.system_info()
 
@@ -58,7 +60,9 @@ def test_longest_matching_location_wins():
         {"Name": "All", "ItemId": "root", "Locations": ["/data"]},
         {"Name": "Anime", "ItemId": "anime", "Locations": ["/data/Anime"]},
     ]
-    client, _ = make_client({("GET", "/Library/VirtualFolders"): FakeResponse(200, libraries)})
+    client, _ = make_client(
+        {("GET", "/Library/VirtualFolders"): FakeResponse(200, libraries)}
+    )
 
     assert client.find_library_for_path("/data/Anime/Show")["ItemId"] == "anime"
     assert client.find_library_for_path("/data/Other/Show")["ItemId"] == "root"
@@ -66,7 +70,9 @@ def test_longest_matching_location_wins():
 
 def test_a_location_prefix_does_not_match_a_sibling_directory():
     libraries = [{"Name": "TV", "ItemId": "tv", "Locations": ["/data/TV"]}]
-    client, _ = make_client({("GET", "/Library/VirtualFolders"): FakeResponse(200, libraries)})
+    client, _ = make_client(
+        {("GET", "/Library/VirtualFolders"): FakeResponse(200, libraries)}
+    )
 
     assert client.find_library_for_path("/data/TVShows/Some Show") is None
 

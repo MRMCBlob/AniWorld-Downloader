@@ -232,8 +232,8 @@ docker inspect --format '{{json .State.Health}}' aniworld-downloader | jq
 Docker does not apply restart policies to health-state changes on its own. The
 container entrypoint therefore watches the same healthcheck and exits after
 three consecutive failures; `restart: unless-stopped` then restarts it. The
-queue picks up where it left off: any item left in `downloading` or `verifying`
-is handed back to `queued` on startup. Set `ANIWORLD_HEALTH_WATCHDOG=0` only if
+queue picks up where it left off: any item left in `running` is handed back to
+`queued` on startup. Set `ANIWORLD_HEALTH_WATCHDOG=0` only if
 another supervisor already owns this behavior.
 
 ---

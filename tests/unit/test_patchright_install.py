@@ -128,23 +128,16 @@ def test_a_stale_revision_is_reinstalled(driver, tmp_path, monkeypatch):
     assert len(calls) == 1
 
 
-def test_a_missing_headless_shell_is_reinstalled(driver, tmp_path, monkeypatch):
-    """The stream sniffers launch headless, which uses the separate shell build."""
+def test_a_missing_headless_shell_is_allowed_with_no_shell_install(
+    driver, tmp_path, monkeypatch, no_subprocess
+):
+    """Upstream v5 deliberately installs Chromium with ``--no-shell``."""
     browsers = tmp_path / "ms-playwright"
     (browsers / f"chromium-{REVISION}").mkdir(parents=True)
     (browsers / f"chromium-{REVISION}" / "INSTALLATION_COMPLETE").write_text("")
     monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(browsers))
 
-    calls = []
-    monkeypatch.setattr(
-        subprocess,
-        "run",
-        lambda cmd, **kw: calls.append(cmd) or subprocess.CompletedProcess(cmd, 0, ""),
-    )
-
     autodeps.ensure_patchright_chromium()
-
-    assert len(calls) == 1
 
 
 def test_a_read_only_browser_directory_is_reported_not_attempted(

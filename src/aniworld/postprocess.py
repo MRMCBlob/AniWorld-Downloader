@@ -100,6 +100,7 @@ def verify_media(path):
             capture_output=True,
             text=True,
             timeout=VERIFY_TIMEOUT,
+            check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         logger.warning(f"ffprobe failed on {path}: {exc}")
@@ -144,7 +145,7 @@ def completed_root():
         return None
     path = Path(raw).expanduser()
     if not path.is_absolute():
-        path = Path.home() / path
+        path = Path(os.environ.get("HOME") or Path.home()) / path
     return path
 
 
@@ -335,7 +336,7 @@ def import_media(path, info, root=None):
         logger.warning(f"Import of {path} failed: {exc}")
         return {"ok": False, "reason": "integration_error", "detail": str(exc)}
     except Exception as exc:
-        logger.error(f"Unexpected error importing {path}: {exc}", exc_info=True)
+        logger.exception(f"Unexpected error importing {path}")
         return {"ok": False, "reason": "unexpected_error", "detail": str(exc)}
 
 
@@ -384,5 +385,9 @@ def _download_root(episode):
     raw = os.getenv("ANIWORLD_DOWNLOAD_PATH", "").strip()
     if raw:
         path = Path(raw).expanduser()
-        return path if path.is_absolute() else Path.home() / path
-    return Path.home() / "Downloads"
+        return (
+            path
+            if path.is_absolute()
+            else Path(os.environ.get("HOME") or Path.home()) / path
+        )
+    return Path(os.environ.get("HOME") or Path.home()) / "Downloads"

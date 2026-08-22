@@ -8,6 +8,7 @@ from .autodeps import ensure_patchright_chromium
 from .config import ACTION_METHODS, ANIWORLD_CONFIG_DIR, VERSION
 from .env import in_docker, merge_env
 from .logger import get_logger
+from .models.common import run_each
 from .providers import resolve_provider
 
 merge_env(
@@ -55,11 +56,6 @@ def aniworld():
         set_terminal_title()
         args = parse_args()
 
-        # The container image ships Chromium already, and its browser directory
-        # is root-owned and read-only for the app user, so a runtime install can
-        # only fail. This used to be detected by comparing the download path
-        # against a hardcoded "/app/Downloads", which silently stopped working
-        # the moment that path became configurable.
         if not in_docker():
             logger.debug("Checking dependencies...")
             ensure_patchright_chromium()
@@ -208,14 +204,29 @@ def aniworld():
 
         if action in ACTION_METHODS:
             method_name = ACTION_METHODS[action]
+            built = []
+            failures = []
+
+            # Building an episode hits the network too, so a title that has gone
+            # missing has to be survivable in the same way the action itself is.
             for episode_url in episodes:
-                episode = provider.episode_cls(
-                    url=episode_url,
-                    selected_path=selected_path,
-                    selected_language=selected_language,
-                    selected_provider=selected_provider,
-                )
-                getattr(episode, method_name)()
+                try:
+                    built.append(
+                        provider.episode_cls(
+                            url=episode_url,
+                            selected_path=selected_path,
+                            selected_language=selected_language,
+                            selected_provider=selected_provider,
+                        )
+                    )
+                except Exception as exc:
+                    logger.error("Could not load %s: %s", episode_url, exc)
+                    failures.append((episode_url, exc))
+
+            failures.extend(run_each(built, method_name))
+            if failures:
+                # Non-zero so scripts and cron jobs still notice an incomplete run
+                return 1
 
         return 0
 
@@ -224,7 +235,7 @@ def aniworld():
         return 130
 
     except Exception as err:
-        logger.error("Unexpected error occurred", exc_info=True)
+        logger.exception("Unexpected error occurred")
         print(f"\nAn unexpected error occurred: {err}", file=sys.stderr)
         print("Please check the logs for more details.", file=sys.stderr)
         return 1

@@ -1,6 +1,7 @@
 import os
 import re
 from functools import lru_cache
+from html import unescape
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
@@ -452,7 +453,8 @@ class MegaKinoEpisode:
             r'<meta\s+itemprop=["\']name["\']\s+content=["\']([^"\']+)["\']',
             self._html,
         )
-        self.__title = match.group(1).strip() if match else None
+        # Escaped in the markup, and this feeds the folder and file names.
+        self.__title = unescape(match.group(1).strip()) if match else None
 
     def __extract_title_cleaned(self):
         self.__title_cleaned = clean_title(self.title) if self.title else None
@@ -462,7 +464,7 @@ class MegaKinoEpisode:
             r'<div\s+class=["\']pmovie__original-title["\']\s+itemprop=["\']alternativeHeadline["\']\s*>([^<]*)<',
             self._html,
         )
-        self.__original_title = match.group(1).strip() if match else None
+        self.__original_title = unescape(match.group(1).strip()) if match else None
 
     def __extract_description(self):
         match = re.search(
@@ -915,7 +917,7 @@ class MegaKinoEpisode:
             return language
 
         if not isinstance(language, str):
-            raise ValueError(f"Unsupported MegaKino language selection: {language}")
+            raise TypeError(f"Unsupported MegaKino language selection: {language}")
 
         normalized = language.strip().lower()
         if normalized in {"german", "deutsch", "german dub"}:
@@ -1034,7 +1036,7 @@ class MegaKinoEpisode:
         language = self._normalize_language(language)
         provider_data = self.provider_data
         if provider_data is None:
-            return tuple()
+            return ()
 
         if isinstance(provider_data, ProviderData):
             provider_dict = provider_data.get((Audio.ENGLISH, Subtitles.NONE))
@@ -1043,7 +1045,7 @@ class MegaKinoEpisode:
         else:
             provider_dict = provider_data.get((Audio.GERMAN, Subtitles.NONE))
 
-        return tuple(provider_dict.keys()) if provider_dict else tuple()
+        return tuple(provider_dict.keys()) if provider_dict else ()
 
     def provider_attempt_order(self):
         return build_provider_attempt_order(

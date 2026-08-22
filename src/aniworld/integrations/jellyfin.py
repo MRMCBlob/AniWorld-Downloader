@@ -90,9 +90,10 @@ class JellyfinClient(HttpClient):
                 location = str(location).rstrip("/")
                 if not location:
                     continue
-                if target == location or target.startswith(location + "/"):
-                    if len(location) > best_len:
-                        best, best_len = folder, len(location)
+                if (
+                    target == location or target.startswith(location + "/")
+                ) and len(location) > best_len:
+                    best, best_len = folder, len(location)
         return best
 
     def refresh_for_path(self, path):

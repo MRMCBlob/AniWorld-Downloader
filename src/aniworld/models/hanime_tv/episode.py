@@ -1,5 +1,6 @@
 import os
 import re
+from html import unescape
 from pathlib import Path
 
 from ...config import NAMING_TEMPLATE
@@ -7,7 +8,7 @@ from ...extractors.provider.hanime_tv import (
     fetch_hanime_api_data,
     get_direct_link_from_hanime_tv,
 )
-from ..common import check_downloaded
+from ..common import check_downloaded, clean_title
 from ..common.common import (
     download_hanime as episode_download,
 )
@@ -71,6 +72,7 @@ class HanimeTVEpisode:
 
         self.__base_folder = None
         self.__folder_path = None
+        self.__naming_title = None
         self.__file_name = None
         self.__file_extension = None
         self.__episode_path = None
@@ -129,11 +131,17 @@ class HanimeTVEpisode:
     def title_de(self):
         return self.__title_de or ""
 
+    @staticmethod
+    def _episode_number_from_slug(slug):
+        match = re.search(r"-(\d+)$", slug or "")
+        return int(match.group(1)) if match else 1
+
     @property
     def episode_number(self):
         if self.__episode_number is None:
-            match = re.search(r"-(\d+)$", self._slug_from_url(self.url))
-            self.__episode_number = int(match.group(1)) if match else 1
+            self.__episode_number = self._episode_number_from_slug(
+                self._slug_from_url(self.url)
+            )
         return self.__episode_number
 
     @property
@@ -229,7 +237,7 @@ class HanimeTVEpisode:
 
     @staticmethod
     def _format_naming_part(
-        template_part, title, year, season_num, episode_num, language
+        template_part, title, year, season_num, episode_num, language, resolution
     ):
         return template_part.format(
             title=title,
@@ -238,7 +246,53 @@ class HanimeTVEpisode:
             season=f"{season_num:02d}",
             episode=f"{episode_num:03d}",
             language=language,
+            resolution=resolution,
         )
+
+    def _collides_in_franchise(self):
+        """True when another video of this franchise claims the same number.
+
+        Those two are the ones the franchise title cannot tell apart, because
+        both end up wanting the same file.
+        """
+
+        videos = self.series.raw_franchise_videos
+        if len(videos) < 2:
+            return False
+
+        slug = self._slug_from_url(self.url)
+        mine = self._episode_number_from_slug(slug)
+        return any(
+            other.get("slug")
+            and other["slug"] != slug
+            and self._episode_number_from_slug(other["slug"]) == mine
+            for other in videos
+        )
+
+    @property
+    def _naming_title(self):
+        """The title the file is named after.
+
+        Normally the franchise title, same as it always was. A hanime
+        franchise can also group videos that are not the same show though, and
+        then two of them want the same file and the second is skipped as
+        already downloaded. Only in that case fall back to the video's own
+        name, which is unique, so nobody else's files get renamed. The folder
+        always stays on the franchise, the way hanime groups them.
+        """
+
+        if self.__naming_title is None:
+            series = self.series
+            if not self._collides_in_franchise():
+                self.__naming_title = series.title_cleaned
+                return self.__naming_title
+
+            name = series.video_title_for_slug(self._slug_from_url(self.url))
+            if not name:
+                name = self.title_en
+            name = series.strip_episode_number(name)
+            self.__naming_title = clean_title(unescape(name)) or series.title_cleaned
+        return self.__naming_title
 
     @property
     def _base_folder(self):
@@ -255,6 +309,7 @@ class HanimeTVEpisode:
                     self.season.season_number,
                     self.episode_number,
                     self.selected_language,
+                    getattr(self, "_resolution", "unknown"),
                 )
                 # Strip empty imdbid markers from folder name
                 folder_str = re.sub(r"\s*\[imdbid-\]\s*", "", folder_str).strip()
@@ -276,6 +331,7 @@ class HanimeTVEpisode:
                     self.season.season_number,
                     self.episode_number,
                     self.selected_language,
+                    getattr(self, "_resolution", "unknown"),
                 )
                 self.__folder_path = self._base_folder / folder_str
         return self.__folder_path
@@ -298,14 +354,16 @@ class HanimeTVEpisode:
             file_template = file_template.replace("%season%", "{season}")
             file_template = file_template.replace("%episode%", "{episode}")
             file_template = file_template.replace("%language%", "{language}")
+            file_template = file_template.replace("%resolution%", "{resolution}")
 
             self.__file_name = self._format_naming_part(
                 file_template,
-                self.series.title_cleaned,
+                self._naming_title,
                 self.series.release_year,
                 self.season.season_number,
                 self.episode_number,
                 self.selected_language,
+                getattr(self, "_resolution", "unknown"),
             )
         return self.__file_name
 

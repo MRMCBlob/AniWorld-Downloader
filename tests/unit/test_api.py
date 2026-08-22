@@ -18,7 +18,6 @@ def client(isolated_db, monkeypatch):
     from aniworld.web import app as app_module
 
     monkeypatch.setattr(app_module, "_ensure_queue_worker", lambda: None)
-    monkeypatch.setattr(app_module, "ANIWORLD_CONFIG_DIR", isolated_db.ANIWORLD_CONFIG_DIR)
     flask_app = app_module.create_app()
     flask_app.config["TESTING"] = True
     return flask_app.test_client()
@@ -47,13 +46,14 @@ def test_status_reports_the_basics(client):
 def test_status_counts_the_queue_by_state(client, isolated_db):
     a = queue_one(isolated_db)
     b = queue_one(isolated_db)
-    isolated_db.set_queue_status(a, "downloading")
-    isolated_db.set_queue_status(b, "imported")
+    isolated_db.set_queue_status(a, "running")
+    isolated_db.set_queue_status(b, "completed")
+    isolated_db.set_queue_import_status(b, "imported")
 
     queue = client.get("/api/status").get_json()["queue"]
 
     assert queue["total"] == 2
-    assert queue["by_status"] == {"downloading": 1, "imported": 1}
+    assert queue["by_status"] == {"completed": 1, "running": 1}
     assert queue["active"] == 1
 
 
@@ -84,9 +84,11 @@ def test_flat_aliases_hit_the_same_handlers(client, isolated_db):
     assert client.post(f"/api/retry/{queue_id}").status_code == 200
     assert isolated_db.get_queue()[0]["status"] == "queued"
 
-    isolated_db.set_queue_status(queue_id, "downloading")
+    isolated_db.set_queue_status(queue_id, "running")
     assert client.post(f"/api/cancel/{queue_id}").status_code == 200
-    assert isolated_db.get_queue()[0]["status"] == "cancelled"
+    row = isolated_db.get_queue()[0]
+    assert row["status"] == "running"
+    assert row["cancel_requested"] == 1
 
 
 def test_pause_and_resume_aliases(client, isolated_db):
@@ -99,13 +101,13 @@ def test_pause_and_resume_aliases(client, isolated_db):
     assert isolated_db.get_queue()[0]["status"] == "queued"
 
 
-def test_cancelling_a_queued_item_is_rejected(client, isolated_db):
+def test_cancelling_a_queued_item_is_supported(client, isolated_db):
     queue_id = queue_one(isolated_db)
 
     response = client.post(f"/api/cancel/{queue_id}")
 
-    assert response.status_code == 400
-    assert "running" in response.get_json()["error"]
+    assert response.status_code == 200
+    assert isolated_db.get_queue()[0]["status"] == "cancelled"
 
 
 def test_priority_can_be_changed(client, isolated_db):

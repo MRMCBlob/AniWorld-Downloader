@@ -12,7 +12,6 @@ from ...config import (
 )
 from ...extractors import provider_functions
 from ..common import check_downloaded
-from .http import sto_get, sto_rewrite, sto_url
 from ..common.common import (
     download as episode_download,
 )
@@ -22,6 +21,7 @@ from ..common.common import (
 from ..common.common import (
     watch as episode_watch,
 )
+from .http import sto_get, sto_rewrite, sto_url
 
 
 # -----------------------------
@@ -357,6 +357,7 @@ class SerienstreamEpisode:
                     season=f"{self.season.season_number:02d}",
                     episode=f"{self.episode_number:03d}",
                     language=self.selected_language,
+                    resolution=getattr(self, "_resolution", "unknown"),
                 )
                 self.__base_folder = Path(self.selected_path) / folder_str
         return self.__base_folder
@@ -376,6 +377,7 @@ class SerienstreamEpisode:
                     season=f"{self.season.season_number:02d}",
                     episode=f"{self.episode_number:03d}",
                     language=self.selected_language,
+                    resolution=getattr(self, "_resolution", "unknown"),
                 )
                 self.__folder_path = self._base_folder / folder_str
         return self.__folder_path
@@ -400,6 +402,7 @@ class SerienstreamEpisode:
             file_template = file_template.replace("%season%", "{season}")
             file_template = file_template.replace("%episode%", "{episode}")
             file_template = file_template.replace("%language%", "{language}")
+            file_template = file_template.replace("%resolution%", "{resolution}")
 
             self.__file_name = file_template.format(
                 title=self.series.title_cleaned,
@@ -408,6 +411,7 @@ class SerienstreamEpisode:
                 season=f"{self.season.season_number:02d}",
                 episode=f"{self.episode_number:03d}",
                 language=self.selected_language,
+                resolution=getattr(self, "_resolution", "unknown"),
             )
         return self.__file_name
 
@@ -577,7 +581,7 @@ class SerienstreamEpisode:
         provider_dict = self.__provider_dict_for_language(
             self._normalize_language(language)
         )
-        return tuple(provider_dict.keys()) if provider_dict else tuple()
+        return tuple(provider_dict.keys()) if provider_dict else ()
 
     def provider_attempt_order(self):
         return build_provider_attempt_order(

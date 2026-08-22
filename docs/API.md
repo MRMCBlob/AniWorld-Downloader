@@ -41,12 +41,12 @@ Health and state. Backs the container `HEALTHCHECK`.
 ```json
 {
   "status": "ok",
-  "version": "4.8.6",
+  "version": "5.0.2",
   "uptime_seconds": 84213.4,
   "worker_running": true,
   "queue": {
     "total": 42,
-    "by_status": { "queued": 3, "downloading": 1, "imported": 38 },
+    "by_status": { "queued": 3, "running": 1, "completed": 38 },
     "active": 1,
     "current": { "title": "Highschool DxD", "current_episode": 4, "total_episodes": 12 }
   },
@@ -79,7 +79,7 @@ the download queue is dead.
     {
       "id": 12,
       "title": "Highschool DxD",
-      "status": "downloading",
+      "status": "running",
       "current_episode": 3,
       "total_episodes": 12,
       "priority": 0,
@@ -96,12 +96,12 @@ the download queue is dead.
 }
 ```
 
-Statuses: `queued`, `downloading`, `verifying`, `completed`, `imported`,
-`failed`, `cancelled`, `paused`.
+Statuses: `queued`, `running`, `paused`, `completed`, `failed`, `cancelled`.
 
-`completed` and `imported` are different answers: `completed` means the file is
-downloaded and verified but Sonarr/Radarr did not take it — `import_status`
-says why.
+The v5 queue keeps download lifecycle in `status` and records Arr outcomes
+separately in `import_status`. A successfully imported item therefore has
+`status: "completed"` and `import_status: "imported"`; otherwise
+`import_status` says why the verified file stayed in the completed folder.
 
 ### `POST /api/download`
 

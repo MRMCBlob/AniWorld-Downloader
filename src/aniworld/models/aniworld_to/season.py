@@ -1,6 +1,8 @@
 import re
+from html import unescape
 
 from ...config import ANIWORLD_SEASON_PATTERN, GLOBAL_SESSION, logger
+from ..common import run_each
 from .episode import AniworldEpisode
 
 
@@ -263,13 +265,15 @@ class AniworldSeason:
             title_de = None
             title_en = None
 
+            # Titles are sliced straight out of the HTML, so entities like
+            # &#039; have to be decoded here or they end up in the UI as-is.
             if self.are_movies:
                 # For movies, title is usually in span, strong tag is empty
                 span_start = tr_html.find("<span>")
                 if span_start != -1:
                     span_start += 6
                     span_end = tr_html.find("</span>", span_start)
-                    title_en = tr_html[span_start:span_end].strip()
+                    title_en = unescape(tr_html[span_start:span_end]).strip()
                     # For movies, use English title as German title since strong is empty
                     title_de = title_en
             else:
@@ -278,13 +282,13 @@ class AniworldSeason:
                 if s_start != -1:
                     s_start += 8
                     s_end = tr_html.find("</strong>", s_start)
-                    title_de = tr_html[s_start:s_end].strip()
+                    title_de = unescape(tr_html[s_start:s_end]).strip()
 
                 span_start = tr_html.find("<span>")
                 if span_start != -1:
                     span_start += 6
                     span_end = tr_html.find("</span>", span_start)
-                    title_en = tr_html[span_start:span_end].strip()
+                    title_en = unescape(tr_html[span_start:span_end]).strip()
 
             if ep_url:
                 # For movies, ep_num might be None, but we can still create the episode object
@@ -326,13 +330,13 @@ class AniworldSeason:
         return count
 
     def download(self):
-        for episode in self.episodes:
-            episode.download()
+        # One failed episode must not abandon the rest of the batch.
+        run_each(self.episodes, "download")
 
     def watch(self):
-        for episode in self.episodes:
-            episode.watch()
+        # One failed episode must not abandon the rest of the batch.
+        run_each(self.episodes, "watch")
 
     def syncplay(self):
-        for episode in self.episodes:
-            episode.syncplay()
+        # One failed episode must not abandon the rest of the batch.
+        run_each(self.episodes, "syncplay")

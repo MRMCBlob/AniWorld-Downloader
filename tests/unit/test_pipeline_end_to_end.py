@@ -72,9 +72,7 @@ class Episode:
         self._episode_path = path
         self.selected_path = str(root)
         self.season = Series(season_number=1, are_movies=False)
-        self.series = Series(
-            title="Example", release_year=2012, imdb="tt1234567"
-        )
+        self.series = Series(title="Example", release_year=2012, imdb="tt1234567")
         self.episode_number = 1
         self.is_movie = False
 
@@ -149,7 +147,7 @@ def no_jellyfin(monkeypatch):
 
 def test_a_download_reaches_sonarr_with_a_mapped_path(roots, sonarr, no_jellyfin):
     incomplete, completed = roots
-    client, session = sonarr()
+    _client, session = sonarr()
     episode = Episode(write_episode(incomplete), incomplete)
 
     result = postprocess.finalize(episode, queue_id=1)
@@ -173,36 +171,23 @@ def test_a_download_reaches_sonarr_with_a_mapped_path(roots, sonarr, no_jellyfin
     assert imported["path"].startswith("/data/completed/")
 
 
-def test_the_queue_item_walks_through_its_states(
-    db, roots, sonarr, no_jellyfin, monkeypatch
+def test_postprocess_keeps_the_v5_running_state_and_records_import_metadata(
+    db, roots, sonarr, no_jellyfin
 ):
-    from aniworld.web import app as app_module
+    from aniworld.web import worker
 
     incomplete, _ = roots
     sonarr()
     queue_id = db.add_to_queue(
         "Example", "https://example.com/s", ["e1"], "German Dub", "VOE"
     )
-    db.set_queue_status(queue_id, "downloading")
+    db.set_queue_status(queue_id, "running")
     episode = Episode(write_episode(incomplete), incomplete)
 
-    seen = []
-    real_set_status = app_module.set_queue_status
-
-    def record(qid, status, **kwargs):
-        seen.append(status)
-        return real_set_status(qid, status, **kwargs)
-
-    monkeypatch.setattr(app_module, "set_queue_status", record)
-
-    assert app_module._run_postprocess({"id": queue_id}, episode) is True
-
-    # 'verifying' while the file is checked, then back to 'downloading' so the
-    # next episode of the same item reads correctly; the terminal status is
-    # decided once the whole item is done.
-    assert seen == ["verifying", "downloading"]
+    assert worker._run_postprocess({"id": queue_id}, episode) is True
 
     row = db.get_queue()[0]
+    assert row["status"] == "running"
     assert row["media_type"] == "series"
     assert row["import_status"] == "imported"
 
@@ -237,10 +222,10 @@ def test_a_refused_import_leaves_the_file_safe_and_the_item_completed(
     db, roots, sonarr, no_jellyfin
 ):
     """Sonarr does not know the series. The download must not be lost."""
-    from aniworld.web import app as app_module
+    from aniworld.web import worker
 
     incomplete, completed = roots
-    client, session = sonarr()
+    _client, session = sonarr()
     session.handlers[("GET", "/api/v3/series")] = FakeResponse(200, [])
 
     queue_id = db.add_to_queue(
@@ -248,7 +233,7 @@ def test_a_refused_import_leaves_the_file_safe_and_the_item_completed(
     )
     episode = Episode(write_episode(incomplete), incomplete)
 
-    imported = app_module._run_postprocess({"id": queue_id}, episode)
+    imported = worker._run_postprocess({"id": queue_id}, episode)
 
     assert imported is False
     assert (completed / "Example (2012)" / "Season 01" / "Example S01E01.mkv").exists()
@@ -269,10 +254,10 @@ def test_a_failing_arr_command_does_not_lose_the_download(roots, sonarr, no_jell
 
 
 def test_a_corrupt_download_is_never_handed_to_sonarr(db, roots, sonarr, no_jellyfin):
-    from aniworld.web import app as app_module
+    from aniworld.web import worker
 
     incomplete, completed = roots
-    client, session = sonarr()
+    _client, session = sonarr()
 
     folder = incomplete / "Example (2012)" / "Season 01"
     folder.mkdir(parents=True)
@@ -285,7 +270,7 @@ def test_a_corrupt_download_is_never_handed_to_sonarr(db, roots, sonarr, no_jell
     episode = Episode(truncated, incomplete)
 
     with pytest.raises(RuntimeError, match="verification failed"):
-        app_module._run_postprocess({"id": queue_id}, episode)
+        worker._run_postprocess({"id": queue_id}, episode)
 
     assert session.calls_to("POST", "/api/v3/command") == []
     assert not completed.exists() or not any(completed.rglob("*.mkv"))
@@ -293,17 +278,17 @@ def test_a_corrupt_download_is_never_handed_to_sonarr(db, roots, sonarr, no_jell
 
 
 def test_an_all_failed_item_is_retried_before_being_marked_failed(db, monkeypatch):
-    from aniworld.web import app as app_module
+    from aniworld.web import worker
 
     monkeypatch.setenv("ANIWORLD_MAX_RETRIES", "2")
     queue_id = db.add_to_queue(
         "Example", "https://example.com/s", ["e1"], "German Dub", "VOE"
     )
-    db.set_queue_status(queue_id, "downloading")
+    db.set_queue_status(queue_id, "running")
     item = db.get_queue()[0]
     errors = [{"url": "e1", "error": "hoster down"}]
 
-    app_module._finish_queue_item(item, ["e1"], errors, 0)
+    worker._finish_queue_item(item, ["e1"], errors, 0)
 
     row = db.get_queue()[0]
     assert row["status"] == "queued", "first failure retries"
@@ -311,69 +296,66 @@ def test_an_all_failed_item_is_retried_before_being_marked_failed(db, monkeypatc
     assert row["next_attempt_at"] is not None
 
     # Second failure exhausts the budget.
-    app_module._finish_queue_item(db.get_queue()[0], ["e1"], errors, 0)
+    worker._finish_queue_item(db.get_queue()[0], ["e1"], errors, 0)
     assert db.get_queue()[0]["status"] == "failed"
 
 
 def test_a_partial_success_is_not_retried(db):
     """Retrying would redownload the episodes that already worked."""
-    from aniworld.web import app as app_module
+    from aniworld.web import worker
 
     queue_id = db.add_to_queue(
         "Example", "https://example.com/s", ["e1", "e2"], "German Dub", "VOE"
     )
-    db.set_queue_status(queue_id, "downloading")
+    db.set_queue_status(queue_id, "running")
     errors = [{"url": "e2", "error": "hoster down"}]
 
-    app_module._finish_queue_item(db.get_queue()[0], ["e1", "e2"], errors, 1)
+    worker._finish_queue_item(db.get_queue()[0], ["e1", "e2"], errors, 1)
 
     row = db.get_queue()[0]
     assert row["status"] == "completed"
     assert row["attempts"] == 0
 
 
-def test_a_fully_imported_item_ends_as_imported(db):
-    from aniworld.web import app as app_module
+def test_a_fully_imported_item_ends_completed_with_import_metadata(db):
+    from aniworld.web import worker
 
     queue_id = db.add_to_queue(
         "Example", "https://example.com/s", ["e1", "e2"], "German Dub", "VOE"
     )
-    db.set_queue_status(queue_id, "downloading")
+    db.set_queue_status(queue_id, "running")
 
-    app_module._finish_queue_item(db.get_queue()[0], ["e1", "e2"], [], 2)
+    worker._finish_queue_item(db.get_queue()[0], ["e1", "e2"], [], 2)
 
-    assert db.get_queue()[0]["status"] == "imported"
+    row = db.get_queue()[0]
+    assert row["status"] == "completed"
+    assert row["import_status"] == "imported"
 
 
 def test_a_restart_hands_active_items_back_to_the_queue(db):
     """The container restarting must not strand work."""
-    downloading = db.add_to_queue(
+    running_a = db.add_to_queue(
         "A", "https://example.com/a", ["e1"], "German Dub", "VOE"
     )
-    verifying = db.add_to_queue(
+    running_b = db.add_to_queue(
         "B", "https://example.com/b", ["e1"], "German Dub", "VOE"
     )
     finished = db.add_to_queue(
         "C", "https://example.com/c", ["e1"], "German Dub", "VOE"
     )
-    db.set_queue_status(downloading, "downloading")
-    db.set_queue_status(verifying, "verifying")
-    db.set_queue_status(finished, "imported")
-    db.schedule_queue_retry(downloading, 3600, "boom")
-    db.set_queue_status(downloading, "downloading")
+    db.set_queue_status(running_a, "running")
+    db.set_queue_status(running_b, "running")
+    db.set_queue_status(finished, "completed")
+    db.set_queue_import_status(finished, "imported")
+    db.schedule_queue_retry(running_a, 3600, "boom")
+    db.set_queue_status(running_a, "running")
 
-    # What _ensure_queue_worker does on startup.
-    conn = db.get_db()
-    conn.execute(
-        "UPDATE download_queue SET status = 'queued', next_attempt_at = NULL "
-        "WHERE status IN ('downloading', 'verifying')"
-    )
-    conn.commit()
-    conn.close()
+    db.reset_stale_running()
 
     rows = {row["title"]: row for row in db.get_queue()}
     assert rows["A"]["status"] == "queued"
     assert rows["A"]["next_attempt_at"] is None, "a restart is not a failed attempt"
     assert rows["B"]["status"] == "queued"
-    assert rows["C"]["status"] == "imported", "finished items are left alone"
+    assert rows["C"]["status"] == "completed", "finished items are left alone"
+    assert rows["C"]["import_status"] == "imported"
     assert db.get_next_queued() is not None

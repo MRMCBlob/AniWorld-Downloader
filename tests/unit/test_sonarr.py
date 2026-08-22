@@ -53,7 +53,9 @@ def base_handlers(candidates=None, command_status="completed"):
             200, json
         ),
         ("POST", "/api/v3/command"): FakeResponse(200, {"id": 99, "status": "queued"}),
-        ("GET", "/api/v3/command/99"): FakeResponse(200, {"id": 99, "status": command_status}),
+        ("GET", "/api/v3/command/99"): FakeResponse(
+            200, {"id": 99, "status": command_status}
+        ),
     }
 
 
@@ -91,7 +93,10 @@ def test_manualimport_get_never_carries_series_id():
 
     params = session.calls_to("GET", "/api/v3/manualimport")[0]["params"]
     assert set(params) == {"folder", "filterExistingFiles"}
-    assert params["folder"] == "/data/downloads/aniworld/completed/Highschool DxD/Season 01"
+    assert (
+        params["folder"]
+        == "/data/downloads/aniworld/completed/Highschool DxD/Season 01"
+    )
 
 
 def test_episode_id_resolved_when_sonarr_cannot_parse_the_name():
@@ -120,7 +125,9 @@ def test_unknown_series_is_reported_not_raised():
     client, _ = make_client(handlers)
 
     result = client.import_file(
-        "/media/x/f.mkv", root="/media/x", hints={"title": "Nope", "season": 1, "episode": 1}
+        "/media/x/f.mkv",
+        root="/media/x",
+        hints={"title": "Nope", "season": 1, "episode": 1},
     )
 
     assert result["ok"] is False
@@ -164,7 +171,9 @@ def test_find_series_matches_by_tvdb_id_over_title():
         tvdbId=1,
         alternateTitles=[],
     )
-    client, _ = make_client({("GET", "/api/v3/series"): FakeResponse(200, [other, SERIES])})
+    client, _ = make_client(
+        {("GET", "/api/v3/series"): FakeResponse(200, [other, SERIES])}
+    )
 
     assert client.find_series(tvdb_id=252083)["id"] == 7
     assert client.find_series(title="High School DxD")["id"] == 7
@@ -174,8 +183,12 @@ def test_find_series_matches_by_tvdb_id_over_title():
 def test_refresh_uses_the_plural_series_ids_field():
     client, session = make_client(
         {
-            ("POST", "/api/v3/command"): FakeResponse(200, {"id": 1, "status": "queued"}),
-            ("GET", "/api/v3/command/1"): FakeResponse(200, {"id": 1, "status": "completed"}),
+            ("POST", "/api/v3/command"): FakeResponse(
+                200, {"id": 1, "status": "queued"}
+            ),
+            ("GET", "/api/v3/command/1"): FakeResponse(
+                200, {"id": 1, "status": "completed"}
+            ),
         }
     )
 
@@ -188,8 +201,12 @@ def test_refresh_uses_the_plural_series_ids_field():
 def test_rescan_uses_the_singular_series_id_field():
     client, session = make_client(
         {
-            ("POST", "/api/v3/command"): FakeResponse(200, {"id": 1, "status": "queued"}),
-            ("GET", "/api/v3/command/1"): FakeResponse(200, {"id": 1, "status": "completed"}),
+            ("POST", "/api/v3/command"): FakeResponse(
+                200, {"id": 1, "status": "queued"}
+            ),
+            ("GET", "/api/v3/command/1"): FakeResponse(
+                200, {"id": 1, "status": "completed"}
+            ),
         }
     )
 
@@ -210,7 +227,9 @@ def test_api_key_is_sent_as_header():
 
 
 def test_bad_api_key_raises_immediately():
-    client, session = make_client({("GET", "/api/v3/series"): FakeResponse(401, text="nope")})
+    client, session = make_client(
+        {("GET", "/api/v3/series"): FakeResponse(401, text="nope")}
+    )
 
     with pytest.raises(IntegrationError, match="rejected the API key"):
         client.list_series()

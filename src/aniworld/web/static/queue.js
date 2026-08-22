@@ -1,710 +1,575 @@
-let queueModalOpen = false;
-let queuePollTimer = null;
-let badgePollTimer = null;
-let queueCustomPaths = [];
+/* The queue page: one page of rows at a time, with filters, search and sort,
+ * plus the captcha viewer that queue rows link into.
+ *
+ * Only ever asks for PAGE_SIZE rows. The whole queue used to come down on every
+ * poll, which grew without bound because nothing prunes finished downloads.
+ */
 
-(function setupMobileNavigation() {
-  const toggle = document.getElementById("mobileNavToggle");
-  const navigation = document.getElementById("mainNavigation");
-  if (!toggle || !navigation) return;
-
-  function setOpen(open) {
-    navigation.classList.toggle("is-open", open);
-    toggle.setAttribute("aria-expanded", String(open));
-    toggle.setAttribute("aria-label", open ? "Close navigation" : "Open navigation");
-  }
-
-  toggle.addEventListener("click", function () {
-    setOpen(toggle.getAttribute("aria-expanded") !== "true");
-  });
-
-  navigation.addEventListener("click", function (event) {
-    if (event.target.closest("a")) setOpen(false);
-  });
-
-  document.addEventListener("click", function (event) {
-    if (!event.target.closest(".top-bar")) setOpen(false);
-  });
-
-  document.addEventListener("keydown", function (event) {
-    if (event.key === "Escape") setOpen(false);
-  });
-
-  window.addEventListener("resize", function () {
-    if (window.innerWidth > 768) setOpen(false);
-  });
-})();
-
-(async function loadQueueCustomPaths() {
-  try {
-    const resp = await fetch("/api/custom-paths");
-    const data = await resp.json();
-    queueCustomPaths = data.paths || [];
-  } catch (e) {
-    /* ignore */
-  }
-})();
-
-function openQueueModal() {
-  queueModalOpen = true;
-  document.getElementById("queueOverlay").style.display = "block";
-  loadQueue();
-  if (queuePollTimer) clearInterval(queuePollTimer);
-  queuePollTimer = setInterval(loadQueue, 2000);
-}
-
-function closeQueueModal() {
-  queueModalOpen = false;
-  document.getElementById("queueOverlay").style.display = "none";
-  if (queuePollTimer) {
-    clearInterval(queuePollTimer);
-    queuePollTimer = null;
-  }
-}
-
-let lastFfmpegProgress = {};
-
-function formatBandwidth(bwStr) {
-  if (!bwStr) return "";
-  const trimmed = String(bwStr).trim();
-  if (/B\/s$/i.test(trimmed)) return trimmed;
-  const m = trimmed.match(/^\s*([\d.]+)\s*([kmg])?bits\/s\s*$/i);
-  if (!m) return bwStr;
-  const value = parseFloat(m[1]);
-  if (Number.isNaN(value)) return bwStr;
-  const unit = (m[2] || "").toLowerCase();
-  let mbps = value;
-  if (unit === "k") mbps = value / 1000;
-  else if (unit === "g") mbps = value * 1000;
-  const mbytes = mbps / 8;
-  return mbytes.toFixed(1) + " MB/s";
-}
-
-let queueFetchController = null;
-
-async function loadQueue() {
-  if (queueFetchController) {
-    queueFetchController.abort();
-  }
-  const controller = new AbortController();
-  queueFetchController = controller;
-  try {
-    const resp = await fetch("/api/queue", { signal: controller.signal });
-    const data = await resp.json();
-    const items = data.items || [];
-    lastFfmpegProgress = data.ffmpeg_progress || {};
-    renderQueue(items);
-    updateBadge(items);
-  } catch (e) {
-    /* ignore */
-  } finally {
-    if (queueFetchController === controller) {
-      queueFetchController = null;
-    }
-  }
-}
-
-// Statuses where the worker is holding the item right now. 'downloading' was
-// called 'running' before the import states were added; it is still accepted so
-// a browser tab left open across an upgrade keeps rendering.
-const ACTIVE_STATUSES = ["downloading", "verifying", "running"];
-const FINISHED_STATUSES = ["completed", "imported", "failed", "cancelled"];
-
-function isActiveStatus(status) {
-  return ACTIVE_STATUSES.indexOf(status) !== -1;
-}
-
-function updateBadge(items) {
-  const active = items.filter(
-    (i) => i.status === "queued" || i.status === "paused" || isActiveStatus(i.status),
-  ).length;
-  const badge = document.getElementById("queueBadge");
-  if (active > 0) {
-    badge.textContent = active;
-    badge.style.display = "inline-block";
-  } else {
-    badge.style.display = "none";
-  }
-}
-
-function renderQueue(items) {
+(function () {
   const list = document.getElementById("queueList");
+  if (!list) return;
 
-  // Show active items on top, then last 3 finished (newest first)
-  const running = items.filter((i) => isActiveStatus(i.status));
-  const queued = items.filter(
-    (i) => i.status === "queued" || i.status === "paused",
+  const filters = document.getElementById("queueFilters");
+  const searchInput = document.getElementById("queueSearch");
+  const sortSelect = document.getElementById("queueSort");
+  const pager = document.getElementById("queuePager");
+  const pagerLabel = document.getElementById("pagerLabel");
+  const badge = document.getElementById("queueBadge");
+  const clearBtn = document.getElementById("clearCompletedBtn");
+
+  const PAGE_SIZE = 25;
+  const POLL = 1500;
+  // Long enough for a loaded server, short enough that a wedged request cannot
+  // sit there forever holding the poller shut.
+  const TIMEOUT = 10000;
+
+  const ACTIVE = ["queued", "running", "paused"];
+
+  // A little longer than the poll, so the bar is still gliding towards the
+  // last value when the next one arrives and never comes to a stop.
+  list.style.setProperty("--progress-step", `${POLL + 200}ms`);
+
+  const state = { status: "", q: "", sort: "smart", page: 0 };
+  let total = 0;
+  let timer = null;
+  let inFlight = false;
+  let loaded = false;
+
+  /* ===== Formatting ===== */
+  const STATUS_LABELS = {
+    queued: "Queued",
+    running: "Running",
+    paused: "Paused",
+    completed: "Done",
+    failed: "Failed",
+    cancelled: "Cancelled"
+  };
+
+  function statusLabel(status) {
+    return t(`queue.status.${status}`, STATUS_LABELS[status] || status);
+  }
+
+  // A running item that was asked to stop keeps downloading until the current
+  // episode is written, so it needs a state of its own.
+  function isStopping(item) {
+    return item.status === "running" && Boolean(item.cancel_requested);
+  }
+
+  function progressPercent(item, ffmpeg) {
+    const count = item.total_episodes || 1;
+    const done = item.current_episode || 0;
+    if (item.status === "completed") return 100;
+    // ffmpeg reports one percentage for the file it is writing right now, and
+    // the worker only ever runs one item, so it belongs to the running one
+    const partial =
+      item.status === "running" && ffmpeg.active ? (ffmpeg.percent || 0) / 100 : 0;
+    return Math.min(100, Math.round(((done + partial) / count) * 100));
+  }
+
+  /* "bandwidth" is bytes off the wire, already formatted as MB/s by both the
+     ffmpeg and the segment path. It needs two size samples, so it is empty for
+     the first moment of a download. ffmpeg also reports a "speed=" multiplier
+     against real time, but showing that in the gap swaps the unit under the
+     reader a second later, so the reading stays in MB/s and just starts at 0. */
+  function speedLabel(item, ffmpeg) {
+    if (item.status !== "running") return "";
+    return (ffmpeg.active && ffmpeg.bandwidth) || "0 MB/s";
+  }
+
+  function formatDuration(seconds) {
+    if (seconds < 60) return t("queue.secs", "{n}s", { n: seconds });
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return t("queue.mins", "{n}min", { n: minutes });
+    return t("queue.hours", "{h}h {m}min", {
+      h: Math.floor(minutes / 60),
+      m: minutes % 60
+    });
+  }
+
+  // Only counts time spent downloading, waiting in the queue does not show up
+  function durationLabel(item) {
+    const seconds = item.duration_seconds;
+    if (seconds == null) return null;
+    const time = formatDuration(seconds);
+    return item.status === "running"
+      ? t("queue.active_for", "active for {time}", { time })
+      : t("queue.took", "took {time}", { time });
+  }
+
+  function metaLine(item) {
+    const counter = t("queue.episode_of", "Episode {current} of {total}", {
+      current: Math.min((item.current_episode || 0) + 1, item.total_episodes),
+      total: item.total_episodes
+    });
+    return [
+      item.language,
+      item.provider,
+      item.priority ? `Priority ${item.priority}` : null,
+      ACTIVE.includes(item.status) ? counter : null,
+      durationLabel(item)
+    ]
+      .filter(Boolean)
+      .join(" | ");
+  }
+
+  /* ===== Rows ===== */
+
+  // The list re-renders on every poll, so remember which error panels are open
+  // or they snap shut under the user a second after they click them.
+  const openErrors = new Set();
+
+  list.addEventListener(
+    "toggle",
+    (event) => {
+      const details = event.target.closest("[data-errors-for]");
+      if (!details) return;
+      const id = Number(details.dataset.errorsFor);
+      if (details.open) openErrors.add(id);
+      else openErrors.delete(id);
+    },
+    true // toggle does not bubble
   );
-  const done = items
-    .filter((i) => FINISHED_STATUSES.indexOf(i.status) !== -1)
-    .slice(-3)
-    .reverse();
-  const visible = running.concat(queued, done);
 
-  if (!visible.length) {
-    list.innerHTML = '<div class="queue-empty">Queue is empty</div>';
-    return;
+  function renderErrors(item) {
+    let errors = [];
+    try {
+      errors = JSON.parse(item.errors || "[]");
+    } catch (e) {
+      errors = [];
+    }
+    if (!errors.length) return "";
+
+    const captcha = errors.find((entry) => entry.captcha_url);
+    const rows = errors
+      .slice(0, 8)
+      .map((entry) => `<li>${esc(entry.error || "")}</li>`)
+      .join("");
+
+    let markup = `<details class="queue-errors" data-errors-for="${item.id}"${openErrors.has(item.id) ? " open" : ""}><summary>${t("queue.errors", "Errors")} (${errors.length})</summary><ul>${rows}</ul></details>`;
+    if (captcha) {
+      markup += `<div class="action-row"><a class="btn btn-ghost" href="${esc(captcha.captcha_url)}" target="_blank" rel="noopener noreferrer">${t("queue.open_captcha", "Solve captcha in browser")}</a></div>`;
+    }
+    return markup;
   }
 
-  // Remember which error panels are expanded before re-render
-  const expandedErrors = new Set();
-  list.querySelectorAll(".queue-error-details.expanded").forEach((el) => {
-    expandedErrors.add(el.id);
-  });
-
-  let html = "";
-  visible.forEach((item) => {
-    const isRunning = isActiveStatus(item.status);
-    const isActive =
-      isRunning || (item.status === "cancelled" && item.current_url);
-    const cls = isActive ? "queue-item queue-item-active" : "queue-item";
-
-    const isCancelling = item.status === "cancelled" && item.current_url;
-
-    let statusBadge = "";
-    if (item.status === "downloading" || item.status === "running")
-      statusBadge =
-        '<span class="queue-status queue-status-running">In Progress</span>';
-    else if (item.status === "verifying")
-      statusBadge =
-        '<span class="queue-status queue-status-verifying">Verifying</span>';
-    else if (item.status === "queued")
-      statusBadge =
-        '<span class="queue-status queue-status-queued">Queued</span>';
-    else if (item.status === "paused")
-      statusBadge =
-        '<span class="queue-status queue-status-paused">Paused</span>';
-    else if (item.status === "imported")
-      statusBadge =
-        '<span class="queue-status queue-status-imported">Imported</span>';
-    else if (item.status === "completed")
-      statusBadge =
-        '<span class="queue-status queue-status-completed">Completed</span>';
-    else if (item.status === "failed")
-      statusBadge =
-        '<span class="queue-status queue-status-failed">Failed</span>';
-    else if (isCancelling)
-      statusBadge =
-        '<span class="queue-status queue-status-cancelling">Cancelling...</span>';
-    else if (item.status === "cancelled")
-      statusBadge =
-        '<span class="queue-status queue-status-cancelled">Cancelled</span>';
-    // Captcha badge shown on top of the running badge when captcha_url is set
-    const captchaBadge = (isRunning && item.captcha_url)
-      ? ' <span class="queue-status queue-status-captcha">CAPTCHA</span>'
-      : '';
-    let progressHtml = "";
-    if (isRunning || isCancelling || item.status === "cancelled") {
-      const epPct =
-        item.total_episodes > 0
-          ? (item.current_episode / item.total_episodes) * 100
-          : 0;
-      const seInfo = item.current_url
-        ? parseSeasonEpisode(item.current_url)
-        : "";
-
-      // Combine episode progress with in-episode ffmpeg progress
-      let ffPct = 0;
-      if ((isRunning || isCancelling) && lastFfmpegProgress.active && item.total_episodes > 0) {
-        ffPct = (lastFfmpegProgress.percent || 0) / item.total_episodes;
-      }
-      const combinedPct = Math.min(Math.round(epPct + ffPct), 100);
-
-      let label;
-      if (item.status === "cancelled" && !isCancelling) {
-        label =
-          item.current_episode +
-          "/" +
-          item.total_episodes +
-          " episodes (stopped)";
-      } else {
-        let epDetail = item.current_episode + "/" + item.total_episodes + " episodes";
-        if (seInfo) epDetail += " - " + seInfo;
-        if (lastFfmpegProgress.active && lastFfmpegProgress.percent > 0) {
-          const bw = formatBandwidth(lastFfmpegProgress.bandwidth || "");
-          epDetail +=
-            " (" +
-            lastFfmpegProgress.percent +
-            "%" +
-            (bw ? " @ " + bw : "") +
-            ")";
-        }
-        if (isCancelling) {
-          epDetail += " - finishing current episode...";
-        }
-        label = epDetail;
-      }
-      progressHtml =
-        '<div class="queue-progress">' +
-        '<div class="queue-progress-info">' +
-        "<span>" +
-        label +
-        "</span>" +
-        "<span>" +
-        combinedPct +
-        "%</span>" +
-        "</div>" +
-        '<div class="queue-progress-bar"><div class="queue-progress-fill" style="width:' +
-        combinedPct +
-        '%"></div></div>' +
-        "</div>";
-    }
-
-    let errorsHtml = "";
-    let kinoxCaptchaUrl = "";
-    if (item.errors) {
-      let errors = [];
-      try {
-        errors =
-          typeof item.errors === "string"
-            ? JSON.parse(item.errors)
-            : item.errors;
-      } catch (e) { }
-      // Kinox (and only kinox) attaches a captcha_url to its errors: the title
-      // page to open and solve the captcha on before retrying.
-      for (let k = 0; k < errors.length; k++) {
-        if (errors[k] && errors[k].captcha_url) {
-          kinoxCaptchaUrl = errors[k].captcha_url;
-          break;
-        }
-      }
-      if (errors.length) {
-        const errId = "qerr-" + item.id;
-        let details = "";
-        errors.forEach(function (err) {
-          var ep = err.url ? parseSeasonEpisode(err.url) : "";
-          var label = ep ? ep + ": " : "";
-          details +=
-            '<div class="queue-error-detail">' +
-            escQ(label + (err.error || "")) +
-            "</div>";
-        });
-        errorsHtml =
-          "<div class=\"queue-errors queue-errors-expandable\" onclick=\"this.classList.toggle('expanded');document.getElementById('" +
-          errId +
-          "').classList.toggle('expanded')\">" +
-          errors.length +
-          ' error(s) <span class="queue-errors-toggle">&#9654;</span>' +
-          "</div>" +
-          '<div class="queue-error-details" id="' +
-          errId +
-          '">' +
-          details +
-          "</div>";
-      }
-    }
-
-    // Kinox-only captcha helper: a link to solve the captcha on the kinox title
-    // page and a retry button. Shown only when a kinox download set captcha_url.
-    let kinoxCaptchaHtml = "";
-    if (kinoxCaptchaUrl) {
-      kinoxCaptchaHtml =
-        '<div class="queue-captcha-solve">' +
-        '<span class="queue-captcha-note">Kinox requires solving a captcha for this title.</span>' +
-        '<a class="queue-captcha-link" href="' +
-        escQ(kinoxCaptchaUrl) +
-        '" target="_blank" rel="noopener noreferrer">&#128274; Solve on Kinox</a>' +
-        '<button class="queue-retry-btn" onclick="retryQueueItem(' +
-        item.id +
-        ')">&#8635; Retry</button>' +
-        "</div>";
-    }
-
-    let actionBtn = "";
-    if (item.status === "queued") {
-      actionBtn =
-        '<button class="queue-move" onclick="moveQueueItem(' +
-        item.id +
-        ',\'up\')" title="Move up">&#9650;</button>' +
-        '<button class="queue-move" onclick="moveQueueItem(' +
-        item.id +
-        ',\'down\')" title="Move down">&#9660;</button>' +
-        '<button class="queue-pause" onclick="pauseQueueItem(' +
-        item.id +
-        ')" title="Pause">&#10074;&#10074;</button>' +
-        '<button class="queue-remove" onclick="removeQueueItem(' +
-        item.id +
-        ')" title="Remove">&times;</button>';
-    } else if (item.status === "paused") {
-      actionBtn =
-        '<button class="queue-resume" onclick="resumeQueueItem(' +
-        item.id +
-        ')" title="Resume">&#9654;</button>' +
-        '<button class="queue-remove" onclick="removeQueueItem(' +
-        item.id +
-        ')" title="Remove">&times;</button>';
-    } else if (item.status === "failed") {
-      actionBtn =
-        '<button class="queue-retry-btn" onclick="retryQueueItem(' +
-        item.id +
-        ')" title="Retry">&#8635; Retry</button>';
-    } else if (isRunning) {
-      const captchaBtn = item.captcha_url
-        ? '<button class="queue-captcha-btn" onclick="openCaptchaModal(' +
-        item.id +
-        ')" title="Solve captcha">&#128274; Solve</button>'
-        : '';
-      actionBtn =
-        captchaBtn +
-        '<button class="queue-cancel" onclick="cancelQueueItem(' +
-        item.id +
-        ')" title="Cancel after current episode">Cancel</button>';
-    } else if (isCancelling) {
-      actionBtn =
-        '<button class="queue-cancel queue-force-cancel" style="background-color: #d32f2f;" onclick="forceCancelQueueItem(' +
-        item.id +
-        ')" title="Immediately kill download and delete partial files">Force Cancel</button>';
-    }
-
-    const userHtml = item.username
-      ? '<span class="queue-user">' + escQ(item.username) + "</span>"
-      : "";
-
-    let pathHtml = "";
-    if (item.custom_path_id) {
-      const cp = queueCustomPaths.find((p) => p.id === item.custom_path_id);
-      const pathName = cp ? cp.name : "Custom #" + item.custom_path_id;
-      pathHtml = '<span class="queue-path">' + escQ(pathName) + "</span>";
-    }
-
-    const syncBadge = (item.source || "").startsWith("sync")
-      ? '<span class="queue-sync-badge">[Sync]</span> '
-      : "";
-
-    // Priority is only worth showing when it differs from the default, so the
-    // common case stays uncluttered.
-    const priorityHtml = item.priority
-      ? '<span class="queue-priority" title="Priority">&#9650; ' +
-      escQ(String(item.priority)) +
-      "</span>"
-      : "";
-
-    const typeHtml = item.media_type
-      ? '<span class="queue-media-type">' + escQ(item.media_type) + "</span>"
-      : "";
-
-    // Attempts matter while a retry is pending: without them a queued item
-    // that keeps failing looks identical to one that never ran.
-    const attempts = item.attempts || 0;
-    const attemptsHtml = attempts
-      ? '<span class="queue-attempts" title="Retry attempts">&#8635; ' +
-      attempts +
-      (item.max_attempts ? "/" + item.max_attempts : "") +
-      "</span>"
-      : "";
-
-    const retryAtHtml = item.next_attempt_at
-      ? '<span class="queue-retry-at" title="Waiting out the retry backoff">next try ' +
-      escQ(item.next_attempt_at) +
-      " UTC</span>"
-      : "";
-
-    let importHtml = "";
-    if (item.import_status && item.import_status !== "imported") {
-      importHtml =
-        '<div class="queue-import-note">Not imported: ' +
-        escQ(item.import_status.replace(/_/g, " ")) +
-        "</div>";
-    }
-
-    const lastErrorHtml =
-      item.last_error && item.status !== "failed"
-        ? '<div class="queue-last-error">' + escQ(item.last_error) + "</div>"
-        : "";
-
-    html +=
-      '<div class="' +
-      cls +
-      '">' +
-      '<div class="queue-item-header">' +
-      '<div class="queue-item-title">' +
-      syncBadge +
-      '<a href="' + escQ(item.series_url) + '" target="_blank" rel="noopener noreferrer">' +
-      escQ(item.title) +
-      '</a>' +
-      "</div>" +
-      '<div class="queue-item-right">' +
-      statusBadge +
-      captchaBadge +
-      actionBtn +
-      "</div>" +
-      "</div>" +
-      '<div class="queue-item-meta">' +
-      "<span>" +
-      item.total_episodes +
-      " episode(s)</span>" +
-      "<span>" +
-      escQ(item.language) +
-      "</span>" +
-      "<span>" +
-      escQ(item.provider) +
-      "</span>" +
-      typeHtml +
-      priorityHtml +
-      attemptsHtml +
-      retryAtHtml +
-      pathHtml +
-      userHtml +
-      "</div>" +
-      progressHtml +
-      importHtml +
-      lastErrorHtml +
-      errorsHtml +
-      kinoxCaptchaHtml +
-      "</div>";
-  });
-
-  list.innerHTML = html;
-
-  // Restore expanded state (both the details panel and its sibling header)
-  expandedErrors.forEach((id) => {
-    const el = document.getElementById(id);
-    if (el) {
-      el.classList.add("expanded");
-      const header = el.previousElementSibling;
-      if (header) header.classList.add("expanded");
-    }
-  });
-}
-
-function parseSeasonEpisode(url) {
-  const m = url.match(/staffel-(\d+)\/episode-(\d+)/i);
-  if (m) return "S" + m[1] + "E" + m[2];
-  const f = url.match(/filme\/film-(\d+)/i);
-  if (f) return "Film " + f[1];
-  return "";
-}
-
-async function cancelQueueItem(id) {
-  try {
-    const resp = await fetch("/api/queue/" + id + "/cancel", {
-      method: "POST",
-    });
-    const data = await resp.json();
-    if (data.error) {
-      if (typeof showToast === "function") showToast(data.error);
-    } else {
-      if (typeof showToast === "function")
-        showToast("Cancelling after current episode...");
-    }
-    loadQueue();
-  } catch (e) {
-    /* ignore */
+  /* Reordering only makes sense against the queue's own order, and only when
+     the whole queue is on show; a filtered or re-sorted page would move a row
+     past a neighbour the reader cannot see. */
+  function reorderable() {
+    return state.sort === "smart" && !state.status && !state.q;
   }
-}
 
-async function forceCancelQueueItem(id) {
-  try {
-    const resp = await fetch("/api/queue/" + id + "/force_cancel", {
-      method: "POST",
-    });
-    const data = await resp.json();
-    if (data.error) {
-      if (typeof showToast === "function") showToast(data.error);
-    } else {
-      if (typeof showToast === "function")
-        showToast("Force cancelling download...");
-    }
-    loadQueue();
-  } catch (e) {
-    /* ignore */
-  }
-}
-
-async function retryQueueItem(id) {
-  try {
-    const resp = await fetch("/api/queue/" + id + "/retry", { method: "POST" });
-    const data = await resp.json();
-    if (data.error) {
-      if (typeof showToast === "function") showToast(data.error);
-    } else if (typeof showToast === "function") {
-      showToast("Retrying download...");
-    }
-    loadQueue();
-  } catch (e) {
-    /* ignore */
-  }
-}
-
-async function clearFinishedQueue() {
-  // Removing a single finished item is not possible — the DELETE route only
-  // accepts queued ones — so this is the only way to empty the history.
-  try {
-    const resp = await fetch("/api/queue/completed", { method: "DELETE" });
-    const data = await resp.json();
-    if (typeof showToast === "function") {
-      showToast(data.error || "Cleared finished downloads");
-    }
-    loadQueue();
-  } catch (e) {
-    /* ignore */
-  }
-}
-
-async function pauseQueueItem(id) {
-  await queueAction(id, "pause", "Paused");
-}
-
-async function resumeQueueItem(id) {
-  await queueAction(id, "resume", "Resumed");
-}
-
-async function queueAction(id, action, successMessage) {
-  try {
-    const resp = await fetch("/api/queue/" + id + "/" + action, {
-      method: "POST",
-    });
-    const data = await resp.json();
-    if (typeof showToast === "function") {
-      showToast(data.error || successMessage);
-    }
-    loadQueue();
-  } catch (e) {
-    /* ignore */
-  }
-}
-
-async function triggerScan(service) {
-  try {
-    const resp = await fetch("/api/" + service + "/scan", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: "{}",
-    });
-    const data = await resp.json();
-    if (typeof showToast === "function") {
-      showToast(
-        data.error || service.charAt(0).toUpperCase() + service.slice(1) + " scan triggered",
+  function renderActions(item) {
+    const buttons = [];
+    if (item.status === "queued" && reorderable()) {
+      buttons.push(
+        `<button class="icon-btn" data-action="move" data-direction="up" data-id="${item.id}" title="Up">&uarr;</button>`,
+        `<button class="icon-btn" data-action="move" data-direction="down" data-id="${item.id}" title="Down">&darr;</button>`
       );
     }
-  } catch (e) {
-    if (typeof showToast === "function") showToast("Scan request failed");
-  }
-}
-
-async function moveQueueItem(id, direction) {
-  try {
-    const resp = await fetch("/api/queue/" + id + "/move", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ direction }),
-    });
-    const data = await resp.json();
-    if (data.error && typeof showToast === "function") showToast(data.error);
-    loadQueue();
-  } catch (e) {
-    /* ignore */
-  }
-}
-
-async function removeQueueItem(id) {
-  try {
-    const resp = await fetch("/api/queue/" + id, { method: "DELETE" });
-    const data = await resp.json();
-    if (data.error) {
-      if (typeof showToast === "function") showToast(data.error);
+    if (item.status === "queued") {
+      buttons.push(
+        `<button class="icon-btn" data-action="priority" data-delta="-1" data-id="${item.id}" title="Lower priority">&minus;</button>`,
+        `<button class="icon-btn" data-action="priority" data-delta="1" data-id="${item.id}" title="Raise priority">+</button>`,
+        `<button class="icon-btn" data-action="pause" data-id="${item.id}" title="Pause">&#10074;&#10074;</button>`
+      );
     }
-    loadQueue();
-  } catch (e) {
-    /* ignore */
-  }
-}
-
-function escQ(s) {
-  const d = document.createElement("div");
-  d.textContent = s || "";
-  return d.innerHTML;
-}
-
-// ESC key closes queue modal
-document.addEventListener("keydown", function (e) {
-  if (e.key === "Escape" && queueModalOpen) closeQueueModal();
-  if (e.key === "Escape" && captchaModalOpen) closeCaptchaModal();
-});
-
-// ===== Captcha Modal =====
-
-let captchaModalOpen = false;
-let captchaQueueId = null;
-let captchaRefreshTimer = null;
-let captchaStatusTimer = null;
-
-function openCaptchaModal(queueId) {
-  captchaQueueId = queueId;
-  captchaModalOpen = true;
-  const overlay = document.getElementById("captchaOverlay");
-  const img = document.getElementById("captchaScreenshot");
-  const hint = document.getElementById("captchaHint");
-  if (!overlay || !img) return;
-
-  img.src = "";
-  if (hint) hint.textContent = "Loading browser screenshot...";
-  overlay.style.display = "block";
-
-  // Start screenshot polling
-  captchaRefreshTimer = setInterval(function () {
-    img.src = "/api/captcha/" + queueId + "/screenshot?t=" + Date.now();
-    img.onload = function () {
-      if (hint) hint.textContent = "Click anywhere in the screenshot to interact with the captcha.";
-    };
-    img.onerror = function () {
-      if (hint) hint.textContent = "Waiting for captcha browser...";
-    };
-  }, 800);
-
-  // Poll for solved status
-  captchaStatusTimer = setInterval(async function () {
-    try {
-      const resp = await fetch("/api/captcha/" + queueId + "/status");
-      const data = await resp.json();
-      if (!data.active || data.done) {
-        closeCaptchaModal();
-        if (typeof showToast === "function")
-          showToast("Captcha solved! Download resuming...");
-        loadQueue();
+    if (item.status === "paused") {
+      buttons.push(
+        `<button class="icon-btn" data-action="resume" data-id="${item.id}" title="Resume">&#9654;</button>`,
+        `<button class="icon-btn" data-action="cancel" data-id="${item.id}" title="Cancel">&times;</button>`
+      );
+    } else if (item.status === "running" || item.status === "queued") {
+      const stopping = isStopping(item);
+      const label = stopping
+        ? t("queue.force_cancel", "Force cancel")
+        : t("common.cancel", "Cancel");
+      buttons.push(
+        `<button class="icon-btn${stopping ? " icon-btn-danger" : ""}"
+          data-action="${stopping ? "force" : "cancel"}" data-id="${item.id}"
+          title="${label}" aria-label="${label}">&times;</button>`
+      );
+    } else {
+      if (item.status === "failed" || item.status === "cancelled") {
+        buttons.push(
+          `<button class="icon-btn" data-action="retry" data-id="${item.id}" title="${t("common.retry", "Retry")}">&#8635;</button>`
+        );
       }
-    } catch (e) {
-      /* ignore */
+      buttons.push(
+        `<button class="icon-btn" data-action="remove" data-id="${item.id}" title="${t("common.remove", "Remove")}">&times;</button>`
+      );
     }
-  }, 1500);
-}
-
-function closeCaptchaModal() {
-  captchaModalOpen = false;
-  captchaQueueId = null;
-  const overlay = document.getElementById("captchaOverlay");
-  if (overlay) overlay.style.display = "none";
-  if (captchaRefreshTimer) {
-    clearInterval(captchaRefreshTimer);
-    captchaRefreshTimer = null;
+    return buttons.join("");
   }
-  if (captchaStatusTimer) {
-    clearInterval(captchaStatusTimer);
-    captchaStatusTimer = null;
-  }
-}
 
-(function attachCaptchaClickHandler() {
-  document.addEventListener("click", function (e) {
-    const img = document.getElementById("captchaScreenshot");
-    if (!img || e.target !== img || !captchaQueueId) return;
-    const rect = img.getBoundingClientRect();
-    const scaleX = img.naturalWidth / img.clientWidth;
-    const scaleY = img.naturalHeight / img.clientHeight;
-    const x = Math.round((e.clientX - rect.left) * scaleX);
-    const y = Math.round((e.clientY - rect.top) * scaleY);
-    fetch("/api/captcha/" + captchaQueueId + "/click", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ x, y }),
-    }).catch(function () { });
+  function renderItem(item, ffmpeg) {
+    const percent = progressPercent(item, ffmpeg);
+    const meta = metaLine(item);
+
+    const captchaBtn =
+      item.status === "running" && item.captcha_url
+        ? `<button class="btn btn-ghost" data-action="captcha" data-id="${item.id}">${t("queue.solve_captcha", "Solve captcha")}</button>`
+        : "";
+
+    const stopping = isStopping(item);
+    const pill = stopping ? "status-cancelled" : `status-${item.status}`;
+    const label = stopping
+      ? t("queue.status.stopping", "Stopping after this episode")
+      : statusLabel(item.status);
+
+    return `
+      <div class="queue-item" data-item="${item.id}" data-priority="${item.priority || 0}">
+        <div class="queue-item-head">
+          <div>
+            <div class="queue-item-title">${esc(item.title)}</div>
+            <div class="queue-item-meta">${esc(meta)}</div>
+          </div>
+          <div class="queue-item-actions">
+            <span class="status-pill ${pill}">${esc(label)}</span>
+            ${renderActions(item)}
+          </div>
+        </div>
+        <div class="progress-track"><div class="progress-fill" data-percent="${percent}" style="width:${percent}%"></div></div>
+        <div class="progress-stats"${item.status === "running" ? "" : " hidden"}>
+          <span data-progress-percent>${percent}%</span>
+          <span data-progress-speed>${esc(speedLabel(item, ffmpeg))}</span>
+        </div>
+        ${captchaBtn ? `<div class="action-row">${captchaBtn}</div>` : ""}
+        ${renderErrors(item)}
+      </div>`;
+  }
+
+  /* ===== Painting =====
+     A running item changes on every poll, so rewriting the list would rebuild
+     the button under the pointer a second at a time and make it flicker. Only
+     the parts that actually moved are touched. */
+
+  /* Everything except the numbers that tick while a download runs. reorderable()
+     belongs here too: a row that survives a sort or filter change would
+     otherwise keep the move arrows it was built with. */
+  function structure(item) {
+    return JSON.stringify([
+      item.title,
+      item.status,
+      isStopping(item),
+      item.errors,
+      item.captcha_url || "",
+      item.total_episodes,
+      item.priority || 0,
+      reorderable()
+    ]);
+  }
+
+  function setProgress(node, percent) {
+    const fill = node.querySelector(".progress-fill");
+    const previous = Number(fill.dataset.percent);
+    // only animate forwards, a reset should land straight back at the start
+    fill.classList.toggle("no-transition", percent < previous);
+    fill.style.width = `${percent}%`;
+    fill.dataset.percent = percent;
+  }
+
+  /* status decides whether the row is there at all and is part of structure(),
+     so by the time we get here it only ever needs its numbers refreshed. */
+  function setStats(node, item, ffmpeg, percent) {
+    const percentNode = node.querySelector("[data-progress-percent]");
+    if (!percentNode) return;
+    percentNode.textContent = `${percent}%`;
+    node.querySelector("[data-progress-speed]").textContent = speedLabel(item, ffmpeg);
+  }
+
+  function paint(node, item, ffmpeg) {
+    if (node.dataset.structure !== structure(item)) {
+      // trimmed, the markup is indented and would leave text nodes behind
+      node.outerHTML = renderItem(item, ffmpeg).trim();
+      return list.querySelector(`[data-item="${item.id}"]`);
+    }
+    const percent = progressPercent(item, ffmpeg);
+    node.querySelector(".queue-item-meta").textContent = metaLine(item);
+    setProgress(node, percent);
+    setStats(node, item, ffmpeg, percent);
+    return node;
+  }
+
+  function renderNotice(markup) {
+    list.innerHTML = markup;
+  }
+
+  function render(items, ffmpeg) {
+    if (!items.length) {
+      const message =
+        state.status || state.q
+          ? t("queue.no_matches", "Nothing here matches that filter.")
+          : t("queue.empty", "The download queue is empty.");
+      renderNotice(`<div class="empty-state">${message}</div>`);
+      return;
+    }
+
+    if (list.querySelector(".empty-state, .queue-error")) list.innerHTML = "";
+
+    const wanted = new Set();
+    items.forEach((item, index) => {
+      wanted.add(String(item.id));
+      let node = list.querySelector(`[data-item="${item.id}"]`);
+      if (node) {
+        node = paint(node, item, ffmpeg);
+      } else {
+        list.insertAdjacentHTML("beforeend", renderItem(item, ffmpeg).trim());
+        node = list.lastElementChild;
+      }
+      node.dataset.structure = structure(item);
+      // moving an existing node keeps it alive, so hover and focus survive
+      if (list.children[index] !== node) {
+        list.insertBefore(node, list.children[index] || null);
+      }
+    });
+
+    Array.from(list.children).forEach((child) => {
+      if (!wanted.has(child.dataset.item)) child.remove();
+    });
+  }
+
+  /* ===== Controls ===== */
+  function pageCount() {
+    return Math.max(1, Math.ceil(total / PAGE_SIZE));
+  }
+
+  function paintControls(counts) {
+    if (counts) {
+      filters.querySelectorAll("[data-count]").forEach((node) => {
+        node.textContent = counts[node.dataset.count] || 0;
+      });
+      const active = counts.active || 0;
+      document.body.dataset.queue = active ? "active" : "idle";
+      document.body.dataset.queueCount = String(active);
+      if (badge) {
+        badge.textContent = String(active);
+        badge.hidden = active === 0;
+      }
+    }
+
+    const pages = pageCount();
+    pager.hidden = total <= PAGE_SIZE;
+    pagerLabel.textContent = t("queue.page_of", "Page {page} of {pages}", {
+      page: state.page + 1,
+      pages: pages
+    });
+    pager.querySelector('[data-page="prev"]').disabled = state.page === 0;
+    pager.querySelector('[data-page="next"]').disabled = state.page + 1 >= pages;
+  }
+
+  /* ===== Loading ===== */
+  function query() {
+    const params = new URLSearchParams({
+      limit: String(PAGE_SIZE),
+      offset: String(state.page * PAGE_SIZE),
+      sort: state.sort
+    });
+    if (state.status) params.set("status", state.status);
+    if (state.q) params.set("q", state.q);
+    return `/api/queue?${params.toString()}`;
+  }
+
+  async function refresh() {
+    if (document.hidden || inFlight) return;
+    inFlight = true;
+    try {
+      const data = await apiFetch(query(), { timeoutMs: TIMEOUT });
+      total = data.total || 0;
+
+      // Deleting the last row of the last page would otherwise strand the
+      // reader on an empty page with no way back except the pager.
+      const pages = pageCount();
+      if (state.page > 0 && state.page >= pages) {
+        state.page = pages - 1;
+        inFlight = false;
+        return refresh();
+      }
+
+      render(data.items || [], data.ffmpeg_progress || {});
+      paintControls(data.counts);
+      loaded = true;
+    } catch (error) {
+      // Keep whatever is already on screen; only a first load has nothing to
+      // show, and either way say what went wrong instead of sitting on
+      // "Loading..." forever.
+      if (!loaded) {
+        renderNotice(
+          `<div class="queue-error">
+             <p>${esc(error.message)}</p>
+             <button class="btn btn-secondary" data-action="reload">${t("common.retry", "Retry")}</button>
+           </div>`
+        );
+      }
+    } finally {
+      inFlight = false;
+    }
+  }
+
+  function reload(resetPage) {
+    if (resetPage) state.page = 0;
+    refresh();
+  }
+
+  function schedule() {
+    clearInterval(timer);
+    timer = setInterval(refresh, POLL);
+  }
+
+  /* ===== Events ===== */
+  filters.addEventListener("click", (event) => {
+    const chip = event.target.closest("[data-status]");
+    if (!chip) return;
+    filters.querySelectorAll(".chip").forEach((node) => node.classList.remove("is-active"));
+    chip.classList.add("is-active");
+    state.status = chip.dataset.status;
+    reload(true);
   });
-})();
 
-// Background badge poll every 10s
-(function startBadgePoll() {
-  loadQueue();
-  badgePollTimer = setInterval(function () {
-    if (!queueModalOpen) loadQueue();
-  }, 10000);
+  let searchTimer = null;
+  searchInput.addEventListener("input", () => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => {
+      state.q = searchInput.value.trim();
+      reload(true);
+    }, 300);
+  });
+
+  sortSelect.addEventListener("change", () => {
+    state.sort = sortSelect.value;
+    reload(true);
+  });
+
+  pager.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-page]");
+    if (!button || button.disabled) return;
+    const pages = pageCount();
+    state.page =
+      button.dataset.page === "next"
+        ? Math.min(state.page + 1, pages - 1)
+        : Math.max(state.page - 1, 0);
+    list.scrollIntoView({ block: "start", behavior: "smooth" });
+    refresh();
+  });
+
+  const ENDPOINTS = {
+    cancel: (id) => [`/api/queue/${id}/cancel`, "POST"],
+    force: (id) => [`/api/queue/${id}/force-cancel`, "POST"],
+    retry: (id) => [`/api/queue/${id}/retry`, "POST"],
+    pause: (id) => [`/api/pause/${id}`, "POST"],
+    resume: (id) => [`/api/resume/${id}`, "POST"],
+    remove: (id) => [`/api/queue/${id}`, "DELETE"]
+  };
+
+  list.addEventListener("click", async (event) => {
+    const button = event.target.closest("[data-action]");
+    if (!button) return;
+    const id = button.dataset.id;
+    const action = button.dataset.action;
+
+    if (action === "reload") {
+      refresh();
+      return;
+    }
+    if (action === "captcha") {
+      openCaptcha(Number(id));
+      return;
+    }
+
+    try {
+      if (action === "move") {
+        await apiSend(`/api/queue/${id}/move`, "POST", {
+          direction: button.dataset.direction
+        });
+      } else if (action === "priority") {
+        const current = Number(button.closest("[data-item]").dataset.priority || 0);
+        await apiSend(`/api/queue/${id}/priority`, "POST", {
+          priority: current + Number(button.dataset.delta || 0)
+        });
+      } else {
+        const [url, method] = ENDPOINTS[action](id);
+        await apiSend(url, method);
+      }
+      refresh();
+    } catch (error) {
+      showToast(error.message);
+    }
+  });
+
+  if (clearBtn) {
+    clearBtn.addEventListener("click", async () => {
+      try {
+        await apiSend("/api/queue/completed", "DELETE");
+        reload(true);
+      } catch (error) {
+        showToast(error.message);
+      }
+    });
+  }
+
+  /* ===== Captcha viewer ===== */
+  const captchaOverlay = document.getElementById("captchaOverlay");
+  const captchaImage = document.getElementById("captchaScreenshot");
+  let captchaId = null;
+  let captchaTimer = null;
+
+  function openCaptcha(queueId) {
+    captchaId = queueId;
+    openModal("captchaOverlay");
+    tickCaptcha();
+    captchaTimer = setInterval(tickCaptcha, 700);
+  }
+
+  async function tickCaptcha() {
+    if (captchaId == null) return;
+    captchaImage.src = `/api/captcha/${captchaId}/screenshot?ts=${Date.now()}`;
+    try {
+      const status = await apiFetch(`/api/captcha/${captchaId}/status`, {
+        timeoutMs: TIMEOUT
+      });
+      if (!status.active || status.done) closeCaptcha();
+    } catch (e) {
+      closeCaptcha();
+    }
+  }
+
+  function closeCaptcha() {
+    clearInterval(captchaTimer);
+    captchaTimer = null;
+    captchaId = null;
+    closeModal("captchaOverlay");
+  }
+
+  captchaOverlay.addEventListener("modal-closed", () => {
+    clearInterval(captchaTimer);
+    captchaTimer = null;
+    captchaId = null;
+  });
+
+  // Forward clicks to the real browser, scaled to its viewport size
+  captchaImage.addEventListener("click", async (event) => {
+    if (captchaId == null) return;
+    const rect = captchaImage.getBoundingClientRect();
+    const scaleX = captchaImage.naturalWidth / rect.width || 1;
+    const scaleY = captchaImage.naturalHeight / rect.height || 1;
+    try {
+      await apiSend(`/api/captcha/${captchaId}/click`, "POST", {
+        x: Math.round((event.clientX - rect.left) * scaleX),
+        y: Math.round((event.clientY - rect.top) * scaleY)
+      });
+    } catch (error) {
+      showToast(error.message);
+    }
+  });
+
+  // Replaces the badge-only refresh from queue-badge.js while this page is up
+  window.refreshQueue = refresh;
+
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) refresh();
+  });
+
+  renderNotice(`<div class="empty-state">${t("common.loading", "Loading...")}</div>`);
+  refresh();
+  schedule();
 })();

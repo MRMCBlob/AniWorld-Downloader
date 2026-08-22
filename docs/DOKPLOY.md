@@ -185,7 +185,7 @@ Then download one episode from the Web UI with `docker compose logs -f` open.
 Expected: the file appears under
 `/media/jellyfin/storagebox/downloads/aniworld/incomplete/…`, moves to
 `…/completed/…`, Sonarr's Activity shows a `ManualImport` command, and the queue
-item goes `queued → downloading → verifying → imported`.
+item goes `queued → running → completed` with `import_status: imported`.
 
 If it stops at `completed`, the UI shows *"Not imported: &lt;reason&gt;"* — the
 reasons and their fixes are in

@@ -56,7 +56,9 @@ def main():
         return 1
 
     port = os.environ.get("ANIWORLD_WEB_PORT", "8080")
-    url = f"http://127.0.0.1:{port}/api/status"
+    # Keep the frequent probe cheap: authenticated/default status calls also
+    # ping Sonarr, Radarr and Jellyfin for the dashboard.
+    url = f"http://127.0.0.1:{port}/api/status?details=0"
 
     try:
         with urllib.request.urlopen(url, timeout=TIMEOUT) as response:

@@ -1,4 +1,5 @@
 import getpass
+import glob
 import hashlib
 import os
 import platform
@@ -10,7 +11,6 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Optional, Tuple
 
 import ffmpeg
 import niquests
@@ -23,11 +23,13 @@ try:
         INVERSE_LANG_LABELS,
         LANG_CODE_MAP,
         LANG_KEY_MAP,
+        NAMING_TEMPLATE,
         PROVIDER_HEADERS_D,
         PROVIDER_HEADERS_W,
         Audio,
         Subtitles,
         get_video_codec,
+        is_sto_host,
         logger,
     )
 except ImportError:
@@ -36,11 +38,13 @@ except ImportError:
         INVERSE_LANG_LABELS,
         LANG_CODE_MAP,
         LANG_KEY_MAP,
+        NAMING_TEMPLATE,
         PROVIDER_HEADERS_D,
         PROVIDER_HEADERS_W,
         Audio,
         Subtitles,
         get_video_codec,
+        is_sto_host,
         logger,
     )
 
@@ -51,6 +55,99 @@ FORBIDDEN_CHARS = re.compile(r'[<>:"/\\|?*]')
 def clean_title(title: str) -> str:
     """Clean a string to make it safe for use as a filename."""
     return FORBIDDEN_CHARS.sub("", title).strip()
+
+
+def _naming_template_uses_resolution():
+    template = os.getenv("ANIWORLD_NAMING_TEMPLATE", NAMING_TEMPLATE)
+    return "{resolution}" in template or "%resolution%" in template
+
+
+def _read_container_resolution(path):
+    """Read one local video stream's height from FFmpeg's container output."""
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-i", str(path)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return "unknown"
+    streams = re.findall(
+        r"^\s*Stream #.*Video:.*?\b\d{2,5}x(\d{2,5})\b",
+        result.stderr or "",
+        re.MULTILINE,
+    )
+    return f"{streams[0]}p" if len(streams) == 1 else "unknown"
+
+
+def _reset_naming_cache(self):
+    suffixes = (
+        "__base_folder",
+        "__folder_path",
+        "__file_name",
+        "__episode_path",
+        "__is_downloaded",
+    )
+    for name in vars(self):
+        if name.endswith(suffixes):
+            setattr(self, name, None)
+
+
+def _set_naming_resolution(self, resolution):
+    self._resolution = resolution
+    _reset_naming_cache(self)
+
+
+def _prepare_resolution_naming(self):
+    """Start with unknown, or reuse a matching previously downloaded file."""
+    if not _naming_template_uses_resolution():
+        return
+    _set_naming_resolution(self, "unknown")
+    if self._episode_path.exists():
+        return
+
+    marker = "__ANIWORLD_RESOLUTION__"
+    _set_naming_resolution(self, marker)
+    pattern = glob.escape(str(self._episode_path)).replace(marker, "*")
+    candidates = [Path(path) for path in glob.glob(pattern)]
+    for candidate in candidates:
+        resolution = _read_container_resolution(candidate)
+        _set_naming_resolution(self, resolution)
+        if self._episode_path == candidate:
+            return
+    _set_naming_resolution(self, "unknown")
+
+
+def _finalize_resolution_naming(self):
+    """Rename a finished local container using its unambiguous resolution."""
+    if not _naming_template_uses_resolution():
+        return
+    old_path = self._episode_path
+    _set_naming_resolution(self, _read_container_resolution(old_path))
+    new_path = self._episode_path
+    if new_path != old_path:
+        new_path.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(old_path, new_path)
+
+
+def _progress_file_name(self):
+    """Hide post-processed resolution metadata from the live progress label."""
+    name = self._file_name or ""
+    resolution = str(getattr(self, "_resolution", "") or "")
+    if not _naming_template_uses_resolution() or not resolution:
+        return name
+    index = name.rfind(resolution)
+    if index < 0:
+        return name
+    start, end = index, index + len(resolution)
+    separators = "._- "
+    if start and name[start - 1] in separators:
+        start -= 1
+    elif end < len(name) and name[end] in separators:
+        end += 1
+    return name[:start] + name[end:]
 
 
 def _quote_windows_cmd_arg(arg) -> str:
@@ -86,7 +183,7 @@ def _quote_windows_cmd_arg(arg) -> str:
     return "".join(escaped)
 
 
-def format_command_for_shell(cmd, windows: Optional[bool] = None) -> str:
+def format_command_for_shell(cmd, windows: bool | None = None) -> str:
     """Format a subprocess argv list as a shell-safe copy/paste command."""
     if windows is None:
         windows = os.name == "nt"
@@ -166,11 +263,11 @@ class ProviderData:
         return f"{self.__class__.__name__}({self._data!r})"
 
     # Accept a tuple directly
-    def get(self, lang_tuple: Tuple[Audio, Subtitles]):
+    def get(self, lang_tuple: tuple[Audio, Subtitles]):
         return self._data.get(lang_tuple, {})
 
     # Behave like a dictionary
-    def __getitem__(self, lang_tuple: Tuple[Audio, Subtitles]):
+    def __getitem__(self, lang_tuple: tuple[Audio, Subtitles]):
         return self._data[lang_tuple]
 
 
@@ -230,7 +327,7 @@ def _cleanup_episode_download(self):
 
 def _reset_provider_resolution_cache(self):
     for attr in list(vars(self)):
-        if attr.endswith("__redirect_url") or attr.endswith("__provider_url"):
+        if attr.endswith(("__redirect_url", "__provider_url")):
             setattr(self, attr, None)
 
 
@@ -332,31 +429,19 @@ def get_ffmpeg_progress():
         return dict(_ffmpeg_progress)
 
 
-# --------------------------------------------------------------------------- #
-# Abort registry
-# --------------------------------------------------------------------------- #
-#
-# FFmpeg already kills itself after a minute without progress, but a download
-# can also wedge outside FFmpeg — in a hoster's HLS playlist, in a captcha, in a
-# socket that never returns. An unattended service cannot afford to lose its
-# only worker to one of those, so a supervisor may ask a job to stop and the
-# long-running loops below check in.
-#
-# Keyed by queue id so it stays correct if more than one download ever runs at
-# a time; the current job is published in a thread-local by the caller that
-# starts the download.
-
+# A queue worker can supervise a download without coupling the models to the
+# web layer. The job id is thread-local; abort requests are process-wide and
+# keyed so a future multi-worker implementation cannot stop the wrong job.
 _aborts = set()
 _aborts_lock = threading.Lock()
 _current_job = threading.local()
 
 
 class DownloadAborted(RuntimeError):
-    """Raised inside a download when a supervisor asked it to stop."""
+    """Raised when the unattended-worker watchdog stopped a stalled download."""
 
 
 def set_current_job(job_id):
-    """Mark this thread as running ``job_id`` (None to clear)."""
     _current_job.job_id = job_id
 
 
@@ -365,22 +450,19 @@ def get_current_job():
 
 
 def request_abort(job_id):
-    if job_id is None:
-        return
-    with _aborts_lock:
-        _aborts.add(job_id)
+    if job_id is not None:
+        with _aborts_lock:
+            _aborts.add(job_id)
 
 
 def clear_abort(job_id):
-    if job_id is None:
-        return
-    with _aborts_lock:
-        _aborts.discard(job_id)
+    if job_id is not None:
+        with _aborts_lock:
+            _aborts.discard(job_id)
 
 
 def abort_requested(job_id=None):
-    if job_id is None:
-        job_id = get_current_job()
+    job_id = get_current_job() if job_id is None else job_id
     if job_id is None:
         return False
     with _aborts_lock:
@@ -409,6 +491,10 @@ def _print_cli_progress(percent, time_str, speed_str, label=""):
     line = f"\r{prefix}[{bar}] {percent:5.1f}% | {time_str} | {speed_str}  "
     sys.stderr.write(line)
     sys.stderr.flush()
+
+
+class DownloadCancelled(Exception):
+    """Raised when we killed the download ourselves, not when it failed."""
 
 
 def _run_ffmpeg_with_progress(node, overwrite_output=True, label=""):
@@ -480,6 +566,7 @@ def _run_ffmpeg_with_progress(node, overwrite_output=True, label=""):
     last_size_ts = None
     last_change = time.monotonic()
     total_duration = 0.0
+    cancelled = False
     aborted = False
 
     with _ffmpeg_progress_lock:
@@ -492,12 +579,12 @@ def _run_ffmpeg_with_progress(node, overwrite_output=True, label=""):
             try:
                 line_str = line_queue.get(timeout=1.0)
             except queue.Empty:
-                # No new line within 1 s – check the abort flag and stall timer
                 if abort_requested():
                     logger.warning("[FFmpeg] Abort requested. Killing process.")
-                    process.kill()
                     aborted = True
+                    process.kill()
                     break
+                # No new line within 1 s – check the built-in stall timer
                 if time.monotonic() - last_change > STALL_TIMEOUT:
                     logger.warning(
                         "[FFmpeg] Stall detected – no progress for "
@@ -512,7 +599,7 @@ def _run_ffmpeg_with_progress(node, overwrite_output=True, label=""):
                 break
 
             # Log the line
-            if line_str.startswith("frame=") or line_str.startswith("size="):
+            if line_str.startswith(("frame=", "size=")):
                 # --- extract progress values ---
                 cur_frame = None
                 cur_time = None
@@ -588,19 +675,18 @@ def _run_ffmpeg_with_progress(node, overwrite_output=True, label=""):
 
                 if abort_requested():
                     logger.warning("[FFmpeg] Abort requested. Killing process.")
-                    process.kill()
                     aborted = True
+                    process.kill()
                     break
 
                 try:
-                    from ...web.db import is_queue_force_cancelled
                     from ...playwright.captcha import _local
+                    from ...web.db import is_queue_force_cancelled
 
                     qid = getattr(_local, "queue_id", None)
                     if qid is not None and is_queue_force_cancelled(qid):
-                        logger.warning(
-                            "[FFmpeg] Force cancel requested. Killing process."
-                        )
+                        logger.info("[FFmpeg] Force cancel requested, stopping.")
+                        cancelled = True
                         process.kill()
                         break
                 except Exception:
@@ -641,10 +727,11 @@ def _run_ffmpeg_with_progress(node, overwrite_output=True, label=""):
     reader_thread.join(timeout=5)
     process.wait()
     if aborted:
-        # Distinct from a plain ffmpeg failure so the caller can tell "we
-        # stopped this on purpose" from "the hoster served us garbage", and
-        # skip the provider-fallback retries that would follow the latter.
         raise DownloadAborted("download aborted by supervisor")
+    # We killed it on purpose, so the non-zero exit code and whatever ffmpeg
+    # printed on its way out are not worth reporting.
+    if cancelled:
+        raise DownloadCancelled("Download cancelled")
     if process.returncode != 0:
         detail = (
             "\n".join(stderr_lines[-20:])
@@ -660,7 +747,7 @@ def movie_folder_enabled():
     return os.getenv("ANIWORLD_MOVIE_FOLDER", "1") != "0"
 
 
-def _finalize_episode(temp_path, episode_path, label=""):
+def _finalize_episode(temp_path, episode_path, label="", owner=None):
     """Move `temp_path` onto `episode_path`, remuxing when containers differ.
 
     The muxer always writes Matroska, so a naming template ending in `.mp4`
@@ -673,6 +760,8 @@ def _finalize_episode(temp_path, episode_path, label=""):
 
     if target_ext == source_ext or target_ext not in ("mkv", "mp4"):
         os.replace(temp_path, episode_path)
+        if owner is not None:
+            _finalize_resolution_naming(owner)
         return
 
     converted = episode_path.with_suffix(f".convert.{target_ext}")
@@ -708,12 +797,14 @@ def _finalize_episode(temp_path, episode_path, label=""):
 
     os.replace(converted, episode_path)
     temp_path.unlink(missing_ok=True)
+    if owner is not None:
+        _finalize_resolution_naming(owner)
 
 
 def _download_direct_http(episode_path, stream_url, file_name):
     """Download a video via direct HTTP (e.g. pixeldrain). Shared helper."""
     temp_file = episode_path.with_suffix(".temp_dl.mp4")
-    ep_label = os.path.splitext(file_name)[0] if file_name else ""
+    ep_label = file_name or ""
 
     try:
         logger.debug(f"[DOWNLOADING] {ep_label} via direct download")
@@ -788,9 +879,11 @@ def _download_direct_http(episode_path, stream_url, file_name):
             )
 
 
-def _download_hls_stream(episode_path, stream_url, file_name, audio_lang="jpn"):
+def _download_hls_stream(
+    episode_path, stream_url, file_name, audio_lang="jpn", owner=None
+):
     """Download a Hanime HLS stream with per-segment retries."""
-    ep_label = os.path.splitext(file_name)[0] if file_name else ""
+    ep_label = file_name or ""
     temp_full = episode_path.with_suffix(".temp_full.mkv")
     temp_prefix = episode_path.with_suffix(".hanime_hls")
 
@@ -854,7 +947,7 @@ def _download_hls_stream(episode_path, stream_url, file_name, audio_lang="jpn"):
                 audio_lang,
             )
 
-        _finalize_episode(temp_full, episode_path, ep_label)
+        _finalize_episode(temp_full, episode_path, ep_label, owner=owner)
     except Exception:
         if temp_full.exists():
             temp_full.unlink()
@@ -872,19 +965,27 @@ def download_hanime(self):
         manager = DependencyManager()
         manager.fetch_binary("ffmpeg")
 
+    _prepare_resolution_naming(self)
+
     if self._episode_path.exists():
         logger.debug(f"[SKIPPED] {self._file_name} (already downloaded)")
         return
 
     os.makedirs(self._folder_path, exist_ok=True)
+    try:
+        stream_url = self.stream_url
+    except Exception as exc:
+        raise RuntimeError(f"Hanime download failed: {exc}") from exc
+
     last_error = None
     for attempt in range(1, 4):
         try:
-            if attempt == 1:
-                stream_url = self.stream_url
-            else:
-                stream_url = self.refresh_stream_url()
-            _download_hls_stream(self._episode_path, stream_url, self._file_name)
+            _download_hls_stream(
+                self._episode_path,
+                stream_url,
+                _progress_file_name(self),
+                owner=self,
+            )
             return
         except Exception as exc:
             last_error = exc
@@ -893,6 +994,12 @@ def download_hanime(self):
                     f"Hanime download attempt {attempt}/3 failed: {exc}; retrying with a fresh stream"
                 )
                 time.sleep(attempt)
+                try:
+                    stream_url = self.refresh_stream_url()
+                except Exception as refresh_exc:
+                    raise RuntimeError(
+                        f"Hanime download failed: {refresh_exc}"
+                    ) from refresh_exc
 
     raise RuntimeError(
         f"Hanime download failed after 3 attempts: {last_error}"
@@ -927,7 +1034,7 @@ def _fetch_hls_segment(session, seg_url, headers, hosts, timeout=90):
                 resp = session.get(url, headers=headers, timeout=timeout)
                 resp.raise_for_status()
                 return resp.content
-            except Exception as exc:  # noqa: BLE001 - try the next mirror
+            except Exception as exc:
                 last_exc = exc
         if attempt == 0:
             time.sleep(1.0)
@@ -1117,6 +1224,7 @@ def download(self):
     max_retries = 3
     provider_order = _get_provider_attempt_order(self)
     provider_errors = {}
+    _prepare_resolution_naming(self)
 
     for provider_index, provider_name in enumerate(provider_order):
         _set_selected_provider(self, provider_name)
@@ -1125,9 +1233,8 @@ def download(self):
             try:
                 _reset_provider_resolution_cache(self)
                 stream_url = self.stream_url
-                check = check_downloaded(self._episode_path)
-
                 headers = PROVIDER_HEADERS_D.get(provider_name, {})
+                check = check_downloaded(self._episode_path)
                 input_kwargs = {
                     "reconnect": 1,
                     "reconnect_streamed": 1,
@@ -1143,8 +1250,8 @@ def download(self):
                     header_list = [f"{k}: {v}" for k, v in headers.items()]
                     input_kwargs["headers"] = "\r\n".join(header_list) + "\r\n"
 
-                url = (getattr(self, "url", "") or "").lower()
-                is_serienstream = ("serienstream.to" in url) or ("s.to" in url)
+                # Covers every host in config.STO_DOMAINS/STO_IP
+                is_serienstream = is_sto_host(getattr(self, "url", "") or "")
 
                 if is_serienstream and hasattr(self, "_normalize_language"):
                     audio_enum, sub_enum = self._normalize_language(
@@ -1186,9 +1293,7 @@ def download(self):
 
                 os.makedirs(self._folder_path, exist_ok=True)
 
-                ep_label = (
-                    os.path.splitext(self._file_name)[0] if self._file_name else ""
-                )
+                ep_label = _progress_file_name(self)
 
                 full_stream_needed = need_audio and need_video
 
@@ -1265,9 +1370,13 @@ def download(self):
                         _run_ffmpeg_with_progress(
                             ffmpeg.output(*inputs, str(output_path), c="copy")
                         )
-                        _finalize_episode(output_path, self._episode_path, ep_label)
+                        _finalize_episode(
+                            output_path, self._episode_path, ep_label, owner=self
+                        )
                     else:
-                        _finalize_episode(temp_full, self._episode_path, ep_label)
+                        _finalize_episode(
+                            temp_full, self._episode_path, ep_label, owner=self
+                        )
 
                     if temp_full.exists():
                         temp_full.unlink()
@@ -1346,7 +1455,7 @@ def download(self):
                 _run_ffmpeg_with_progress(
                     ffmpeg.output(*inputs, str(output_path), c="copy")
                 )
-                _finalize_episode(output_path, self._episode_path, ep_label)
+                _finalize_episode(output_path, self._episode_path, ep_label, owner=self)
 
                 for f in (temp_audio, temp_video):
                     if f.exists():
@@ -1363,10 +1472,22 @@ def download(self):
                 )
                 raise
 
+            except DownloadCancelled:
+                # The user stopped this, so clean up and get out instead of
+                # logging a failure and trying the next provider.
+                _cleanup_episode_download(self)
+                if self._episode_path.exists():
+                    self._episode_path.unlink()
+                _remove_empty_dirs(
+                    self._folder_path,
+                    self._base_folder,
+                    protected=getattr(self, "selected_path", None),
+                )
+                raise
+
             except DownloadAborted:
-                # A supervisor stopped this on purpose. Cycling through the
-                # remaining providers would ignore that and keep the worker
-                # busy for another few minutes.
+                # Do not cycle through provider fallbacks after the supervisor
+                # deliberately stopped this attempt.
                 _cleanup_episode_download(self)
                 _remove_empty_dirs(
                     self._folder_path,
@@ -1379,8 +1500,8 @@ def download(self):
                 _cleanup_episode_download(self)
 
                 try:
-                    from ...web.db import is_queue_force_cancelled
                     from ...playwright.captcha import _local
+                    from ...web.db import is_queue_force_cancelled
 
                     qid = getattr(_local, "queue_id", None)
                     if qid is not None and is_queue_force_cancelled(qid):
@@ -1391,7 +1512,7 @@ def download(self):
                             self._base_folder,
                             protected=getattr(self, "selected_path", None),
                         )
-                        raise e
+                        raise
                 except Exception as inner_e:
                     if inner_e is e:
                         raise
@@ -1478,7 +1599,7 @@ def watch(self):
                     cmd.extend(_build_player_header_args(headers))
 
                 print(format_command_for_shell(cmd))
-                process = subprocess.run(cmd)
+                process = subprocess.run(cmd, check=False)
                 if process.returncode != 0:
                     raise RuntimeError(f"player exited with code {process.returncode}")
                 return
@@ -1539,9 +1660,7 @@ def syncplay(self):
         logger.debug(f"{room}-{file_name}-{syncplay_password}")
         room += (
             "-"
-            + hashlib.sha256(
-                f"-{file_name}-{syncplay_password}".encode("utf-8")
-            ).hexdigest()
+            + hashlib.sha256(f"-{file_name}-{syncplay_password}".encode()).hexdigest()
         )
     else:
         logger.debug(f"{room}-{file_name}")
@@ -1594,7 +1713,7 @@ def syncplay(self):
 
     print(format_command_for_shell(cmd))
     logger.debug("\n" + format_command_for_shell(cmd))
-    subprocess.run(cmd)
+    subprocess.run(cmd, check=False)
 
 
 if __name__ == "__main__":

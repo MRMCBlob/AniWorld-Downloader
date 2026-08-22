@@ -18,14 +18,14 @@ from urllib.parse import urlparse
 
 try:
     from ...config import (
-        Audio,
         DEFAULT_USER_AGENT,
+        Audio,
         Subtitles,
         build_provider_attempt_order,
         logger,
     )
     from ...extractors import provider_functions
-    from ..common import check_downloaded
+    from ..common import check_downloaded, run_each
     from ..common.common import clean_title
     from ..common.common import download as episode_download
     from ..common.common import syncplay as episode_syncplay
@@ -34,14 +34,14 @@ try:
     from ..common.provider_map import host_to_provider
 except ImportError:
     from aniworld.config import (
-        Audio,
         DEFAULT_USER_AGENT,
+        Audio,
         Subtitles,
         build_provider_attempt_order,
         logger,
     )
     from aniworld.extractors import provider_functions
-    from aniworld.models.common import check_downloaded
+    from aniworld.models.common import check_downloaded, run_each
     from aniworld.models.common.common import clean_title
     from aniworld.models.common.common import download as episode_download
     from aniworld.models.common.common import syncplay as episode_syncplay
@@ -143,7 +143,7 @@ def _bs_curl_get(url, referer=None, timeout=12):
         return resp.text, str(resp.url)
     except ImportError:
         pass
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.debug(f"burning-series curl_cffi fetch failed ({exc}); using niquests")
     resp = get_session().get(
         url, headers=headers, allow_redirects=True, timeout=timeout
@@ -179,7 +179,7 @@ def _resolve_hoster_link(hoster_path, referer):
             player_url = f"{base}/{rel}"
             try:
                 player_html, _ = _bs_curl_get(player_url, referer)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 last_err = exc
                 continue
 
@@ -210,7 +210,7 @@ def _resolve_hoster_link(hoster_path, referer):
                 _body, final = _bs_curl_get(stream_url, player_url)
                 if final and not _is_bs_host(final):
                     return final
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.debug(f"burning-series redirect follow failed: {exc}")
 
             # Fallback: the redirect renders the embed client-side — let the
@@ -221,7 +221,7 @@ def _resolve_hoster_link(hoster_path, referer):
                 embed = playwright_get_iframe_url(stream_url)
                 if embed and not _is_bs_host(embed):
                     return embed
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 last_err = exc
 
         if vpn_blocked:
@@ -583,16 +583,16 @@ class BurningSeriesSeason(_BSLanguageMixin):
         return labels or ["German Dub"]
 
     def download(self):
-        for episode in self.episodes:
-            episode.download()
+        # One failed episode must not abandon the rest of the batch.
+        run_each(self.episodes, "download")
 
     def watch(self):
-        for episode in self.episodes:
-            episode.watch()
+        # One failed episode must not abandon the rest of the batch.
+        run_each(self.episodes, "watch")
 
     def syncplay(self):
-        for episode in self.episodes:
-            episode.syncplay()
+        # One failed episode must not abandon the rest of the batch.
+        run_each(self.episodes, "syncplay")
 
 
 class BurningSeriesSeries:
@@ -625,7 +625,9 @@ class BurningSeriesSeries:
                 title = re.sub(r"<[^>]+>", " ", m.group(1))
                 # The heading also carries the season nav ("… Staffel 1"); drop it.
                 title = re.split(r"\bStaffel\b", title, flags=re.IGNORECASE)[0]
-                title = re.sub(r"\s+", " ", title).strip()
+                # Unescape after the tags are stripped, not before, or a literal
+                # &lt;b&gt; in a title would turn into a tag and be removed.
+                title = re.sub(r"\s+", " ", html_module.unescape(title)).strip()
             else:
                 title = (self.slug or "").replace("-", " ").title()
             self.__title = title or self.slug

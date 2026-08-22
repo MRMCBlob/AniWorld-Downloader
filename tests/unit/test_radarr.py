@@ -25,7 +25,9 @@ CANDIDATE = {
     "rejections": [],
 }
 
-FILE = "/media/downloads/aniworld/completed/Spirited Away (2001)/Spirited Away (2001).mkv"
+FILE = (
+    "/media/downloads/aniworld/completed/Spirited Away (2001)/Spirited Away (2001).mkv"
+)
 ROOT = "/media/downloads/aniworld/completed"
 
 
@@ -41,9 +43,13 @@ def base_handlers(candidates=None, command_status="completed"):
         ("GET", "/api/v3/manualimport"): FakeResponse(
             200, [CANDIDATE] if candidates is None else candidates
         ),
-        ("POST", "/api/v3/manualimport"): lambda params, json, headers: FakeResponse(200, json),
+        ("POST", "/api/v3/manualimport"): lambda params, json, headers: FakeResponse(
+            200, json
+        ),
         ("POST", "/api/v3/command"): FakeResponse(200, {"id": 5, "status": "queued"}),
-        ("GET", "/api/v3/command/5"): FakeResponse(200, {"id": 5, "status": command_status}),
+        ("GET", "/api/v3/command/5"): FakeResponse(
+            200, {"id": 5, "status": command_status}
+        ),
     }
 
 
@@ -72,7 +78,9 @@ def test_manualimport_get_never_carries_movie_id():
 
 def test_year_disambiguates_movies_sharing_a_title():
     remake = dict(MOVIE, id=4, year=2024, tmdbId=999, imdbId="tt9999999")
-    client, _ = make_client({("GET", "/api/v3/movie"): FakeResponse(200, [MOVIE, remake])})
+    client, _ = make_client(
+        {("GET", "/api/v3/movie"): FakeResponse(200, [MOVIE, remake])}
+    )
 
     assert client.find_movie(title="Spirited Away", year=2024)["id"] == 4
     assert client.find_movie(title="Spirited Away", year=2001)["id"] == 3
@@ -101,8 +109,13 @@ def test_copy_import_mode_is_honoured():
     os.environ["ANIWORLD_ARR_IMPORT_MODE"] = "copy"
     try:
         client, session = make_client(base_handlers())
-        client.import_file(FILE, root=ROOT, hints={"title": "Spirited Away", "year": 2001})
-        assert session.last_call_to("POST", "/api/v3/command")["json"]["importMode"] == "Copy"
+        client.import_file(
+            FILE, root=ROOT, hints={"title": "Spirited Away", "year": 2001}
+        )
+        assert (
+            session.last_call_to("POST", "/api/v3/command")["json"]["importMode"]
+            == "Copy"
+        )
     finally:
         del os.environ["ANIWORLD_ARR_IMPORT_MODE"]
 
@@ -110,7 +123,9 @@ def test_copy_import_mode_is_honoured():
 def test_rescan_uses_singular_movie_id_and_refresh_the_plural():
     handlers = {
         ("POST", "/api/v3/command"): FakeResponse(200, {"id": 5, "status": "queued"}),
-        ("GET", "/api/v3/command/5"): FakeResponse(200, {"id": 5, "status": "completed"}),
+        ("GET", "/api/v3/command/5"): FakeResponse(
+            200, {"id": 5, "status": "completed"}
+        ),
     }
     client, session = make_client(handlers)
 

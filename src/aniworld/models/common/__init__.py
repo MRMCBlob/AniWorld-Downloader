@@ -1,3 +1,4 @@
+from .batch import run_each
 from .common import (
     ProviderData,
     check_downloaded,
@@ -16,6 +17,7 @@ __all__ = [
     "download",
     "download_hanime",
     "movie_folder_enabled",
+    "run_each",
     "syncplay",
     "watch",
 ]

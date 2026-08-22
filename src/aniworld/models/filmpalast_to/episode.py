@@ -1,5 +1,6 @@
 import os
 import re
+from html import unescape
 from pathlib import Path
 
 try:
@@ -108,9 +109,9 @@ class FilmPalastEpisode:
     def __init__(
         self,
         url: str,
-        selected_path: str = None,
-        selected_language: str = None,
-        selected_provider: str = None,
+        selected_path: str | None = None,
+        selected_language: str | None = None,
+        selected_provider: str | None = None,
     ):
         if not self.__is_valid_filmpalast_episode_url(url):
             raise ValueError(f"Invalid FilmPalast episode URL: {url}")
@@ -415,7 +416,8 @@ class FilmPalastEpisode:
     def __extract_title_de(self):
         match = re.search(r'<em itemprop="name">(.*?)</em>', self._html)
         if match:
-            self.__title_de = match.group(1).strip()
+            # Escaped in the markup, and this feeds the folder and file names.
+            self.__title_de = unescape(match.group(1).strip())
 
     def __extract_user_watched(self):
         match = re.search(r"<strong>(\d+)</strong> Nutzer", self._html)
@@ -523,11 +525,11 @@ class FilmPalastEpisode:
     def available_providers(self, language=None):
         provider_data = self.provider_data
         if not isinstance(provider_data, ProviderData):
-            return tuple()
+            return ()
         provider_dict = provider_data.get(
             (Audio.GERMAN, Subtitles.NONE)
         ) or provider_data.get((Audio.ENGLISH, Subtitles.NONE))
-        return tuple(provider_dict.keys()) if provider_dict else tuple()
+        return tuple(provider_dict.keys()) if provider_dict else ()
 
     def provider_attempt_order(self):
         return build_provider_attempt_order(

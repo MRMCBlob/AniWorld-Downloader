@@ -1,4 +1,5 @@
 import re
+from html import unescape
 from urllib.parse import urljoin, urlparse
 
 from ...config import SERIENSTREAM_SERIES_PATTERN, logger
@@ -189,8 +190,9 @@ class SerienstreamSeries:
         match = pattern.search(self._html)
 
         if match:
-            title = match.group(1).strip()
-            return title
+            # The page stores the title HTML escaped, so "It's" arrives as
+            # "It&#039;s" and would end up in the folder and file names.
+            return unescape(match.group(1).strip())
 
         return None
 
@@ -596,16 +598,16 @@ class SerienstreamSeries:
     # PUBLIC METHODS
     # -----------------------------
     def download(self):
+        # One failed episode must not abandon the rest of the batch.
         for season in self.seasons:
-            for episode in season.episodes:
-                episode.download()
+            season.download()
 
     def watch(self):
+        # One failed episode must not abandon the rest of the batch.
         for season in self.seasons:
-            for episode in season.episodes:
-                episode.watch()
+            season.watch()
 
     def syncplay(self):
+        # One failed episode must not abandon the rest of the batch.
         for season in self.seasons:
-            for episode in season.episodes:
-                episode.syncplay()
+            season.syncplay()

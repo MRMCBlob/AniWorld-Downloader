@@ -28,13 +28,13 @@ from .sonarr import SonarrClient
 logger = get_logger(__name__)
 
 __all__ = [
+    "MOVIE",
+    "SERIES",
     "IntegrationError",
     "IntegrationNotConfigured",
     "JellyfinClient",
-    "MOVIE",
     "MediaInfo",
     "RadarrClient",
-    "SERIES",
     "SonarrClient",
     "classify",
     "get_jellyfin",

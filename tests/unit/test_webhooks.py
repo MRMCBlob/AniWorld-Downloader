@@ -171,9 +171,7 @@ def test_delivered_rows_are_purged(db, monkeypatch):
     db.mark_webhook_delivered(row_id)
 
     conn = db.get_db()
-    conn.execute(
-        "UPDATE webhook_outbox SET delivered_at = datetime('now', '-30 days')"
-    )
+    conn.execute("UPDATE webhook_outbox SET delivered_at = datetime('now', '-30 days')")
     conn.commit()
     conn.close()
 

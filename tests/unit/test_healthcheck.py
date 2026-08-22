@@ -5,7 +5,6 @@ from pathlib import Path
 
 import pytest
 
-
 HEALTHCHECK_PATH = Path(__file__).parents[2] / "docker" / "healthcheck.py"
 SPEC = importlib.util.spec_from_file_location("container_healthcheck", HEALTHCHECK_PATH)
 healthcheck = importlib.util.module_from_spec(SPEC)
@@ -27,7 +26,7 @@ def test_storage_check_accepts_available_directories(monkeypatch, tmp_path):
     config = tmp_path / "config"
     downloads = tmp_path / "downloads"
     config.mkdir()
-    downloads.mkdir()
+    downloads.mkdir(exist_ok=True)
     monkeypatch.setenv("ANIWORLD_INSTALL_FOLDER", str(config))
     monkeypatch.setenv("ANIWORLD_DOWNLOAD_PATH", str(downloads))
 

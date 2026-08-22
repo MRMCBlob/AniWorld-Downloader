@@ -1,330 +1,257 @@
-// Auto-Sync page logic
+/* Auto-Sync page: status, last report and the exclusion list. */
 
-const autosyncList = document.getElementById("autosyncList");
-const autosyncEmpty = document.getElementById("autosyncEmpty");
+(function () {
+  const el = (id) => document.getElementById(id);
 
-// Schedule map for computing next check time
-const SCHEDULE_INTERVALS = {
-  "1min": 60,
-  "30min": 1800,
-  "1h": 3600,
-  "2h": 7200,
-  "4h": 14400,
-  "8h": 28800,
-  "12h": 43200,
-  "16h": 57600,
-  "24h": 86400,
-};
-const SCHEDULE_LABELS = {
-  "1min": "1 min",
-  "30min": "30 min",
-  "1h": "1h",
-  "2h": "2h",
-  "4h": "4h",
-  "8h": "8h",
-  "12h": "12h",
-  "16h": "16h",
-  "24h": "24h",
-};
+  const syncNowBtn = el("syncNowBtn");
+  const exclusionsBody = el("exclusionsBody");
+  let excludedUrls = new Set();
 
-let currentSyncSchedule = "0";
-let customPathsCache = [];
-let langSepEnabled = false;
+  // While a run is going, poll often enough to feel live
+  const IDLE_POLL = 30000;
+  const RUNNING_POLL = 3000;
 
-async function loadSyncSchedule() {
-  try {
-    const resp = await fetch("/api/settings");
-    const data = await resp.json();
-    currentSyncSchedule = data.sync_schedule || "0";
-    langSepEnabled = data.lang_separation === "1";
-  } catch (e) {
-    /* ignore */
+  let timer = null;
+
+  const STATUS_CLASS = {
+    queued: "status-completed",
+    "up-to-date": "status-queued",
+    skipped: "status-cancelled",
+    error: "status-failed"
+  };
+
+  const STATUS_LABELS = {
+    queued: "Queued",
+    "up-to-date": "Up to date",
+    skipped: "Skipped",
+    error: "Error"
+  };
+
+  function statusLabel(status) {
+    const key = String(status).replace(/-/g, "_");
+    return t(`autosync.status.${key}`, STATUS_LABELS[status] || status);
   }
-}
 
-async function loadCustomPathsForEdit() {
-  try {
-    const resp = await fetch("/api/custom-paths");
-    const data = await resp.json();
-    customPathsCache = data.paths || [];
-  } catch (e) {
-    customPathsCache = [];
+  function formatTime(value) {
+    if (!value) return "-";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return "-";
+    return date.toLocaleString();
   }
-}
 
-async function loadAutosyncJobs() {
-  try {
-    const res = await fetch("/api/autosync");
-    const data = await res.json();
-    renderJobs(data.jobs || []);
-  } catch (e) {
-    autosyncList.innerHTML =
-      '<div class="queue-empty">Failed to load sync jobs.</div>';
+  function schedule(running) {
+    clearTimeout(timer);
+    timer = setTimeout(load, running ? RUNNING_POLL : IDLE_POLL);
   }
-}
 
-function computeNextCheck(lastCheck) {
-  if (!lastCheck || currentSyncSchedule === "0") return "—";
-  const interval = SCHEDULE_INTERVALS[currentSyncSchedule];
-  if (!interval) return "—";
-  const lastMs = new Date(lastCheck + "Z").getTime();
-  const nextMs = lastMs + interval * 1000;
-  const now = Date.now();
-  if (nextMs <= now) return "Soon";
-  return formatDate(
-    new Date(nextMs)
-      .toISOString()
-      .replace("Z", "")
-      .replace("T", " ")
-      .slice(0, 19),
-  );
-}
-
-function renderJobs(jobs) {
-  if (!jobs.length) {
-    autosyncList.innerHTML =
-      '<div class="queue-empty">No sync jobs yet. Add a series via the search page.</div>';
-    return;
-  }
-  let html =
-    '<table class="user-table" style="table-layout:auto"><thead><tr>' +
-    "<th>Title</th><th>Last Check</th><th>Re-Check at</th><th>Last New Found</th><th>Episodes</th>" +
-    "<th>Download Path</th><th>Status</th><th>Added By</th><th>Actions</th>" +
-    "</tr></thead><tbody>";
-  for (const job of jobs) {
-    const statusClass = job.enabled
-      ? "queue-status-completed"
-      : "queue-status-queued";
-    const statusLabel = job.enabled ? "Enabled" : "Disabled";
-    const lastCheck = job.last_check ? formatDate(job.last_check) : "—";
-    const nextCheck = job.enabled ? computeNextCheck(job.last_check) : "—";
-    const lastNew = job.last_new_found ? formatDate(job.last_new_found) : "—";
-    let dlPath = "Default";
-    if (job.custom_path_id) {
-      const cp = customPathsCache.find((p) => p.id === job.custom_path_id);
-      dlPath = cp ? cp.name : "Custom #" + job.custom_path_id;
+  function renderReport(report) {
+    const container = el("syncReport");
+    if (!report) {
+      container.innerHTML = `<div class="empty-state">${t("autosync.never_ran", "Auto-Sync has not run yet.")}</div>`;
+      return;
     }
-    const addedBy = job.added_by ? esc(job.added_by) : "—";
-    html +=
-      "<tr>" +
-      '<td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:500;color:#e2e4e9" title="' +
-      esc(job.series_url) +
-      '">' +
-      esc(job.title) +
-      "</td>" +
-      "<td>" +
-      lastCheck +
-      "</td>" +
-      "<td>" +
-      nextCheck +
-      "</td>" +
-      "<td>" +
-      lastNew +
-      "</td>" +
-      "<td>" +
-      job.episodes_found +
-      "</td>" +
-      "<td>" +
-      dlPath +
-      "</td>" +
-      '<td><span class="queue-status ' +
-      statusClass +
-      '">' +
-      statusLabel +
-      "</span></td>" +
-      "<td>" +
-      addedBy +
-      "</td>" +
-      '<td><div class="queue-item-right">' +
-      '<button class="queue-move" onclick="openEditModal(' +
-      job.id +
-      ')" title="Edit" style="font-size:.85rem">✎</button>' +
-      '<button class="queue-move" onclick="syncNow(' +
-      job.id +
-      ')" title="Sync Now" style="font-size:.85rem;color:#6ea8fe">⟳</button>' +
-      '<button class="queue-remove" onclick="removeJob(' +
-      job.id +
-      ')" title="Remove" style="font-size:.85rem">✕</button>' +
-      "</div></td>" +
-      "</tr>";
-  }
-  html += "</tbody></table>";
-  autosyncList.innerHTML = html;
-}
-
-function formatDate(isoStr) {
-  if (!isoStr) return "—";
-  const d = new Date(isoStr + "Z");
-  if (isNaN(d.getTime())) {
-    // Try without adding Z (already formatted)
-    const d2 = new Date(isoStr);
-    if (isNaN(d2.getTime())) return "—";
-    const pad = (n) => String(n).padStart(2, "0");
-    return (
-      pad(d2.getDate()) +
-      "." +
-      pad(d2.getMonth() + 1) +
-      "." +
-      d2.getFullYear() +
-      " " +
-      pad(d2.getHours()) +
-      ":" +
-      pad(d2.getMinutes())
-    );
-  }
-  const pad = (n) => String(n).padStart(2, "0");
-  return (
-    pad(d.getDate()) +
-    "." +
-    pad(d.getMonth() + 1) +
-    "." +
-    d.getFullYear() +
-    " " +
-    pad(d.getHours()) +
-    ":" +
-    pad(d.getMinutes())
-  );
-}
-
-async function syncNow(id) {
-  try {
-    const res = await fetch("/api/autosync/" + id + "/sync", {
-      method: "POST",
-    });
-    const data = await res.json();
-    if (data.ok) {
-      showToast("Sync started");
-      setTimeout(loadAutosyncJobs, 2000);
-    } else {
-      showToast(data.error || "Failed to start sync");
-    }
-  } catch (e) {
-    showToast("Failed to start sync");
-  }
-}
-
-async function removeJob(id) {
-  if (!confirm("Remove this sync job?")) return;
-  try {
-    const res = await fetch("/api/autosync/" + id, { method: "DELETE" });
-    const data = await res.json();
-    if (data.ok) {
-      showToast("Sync job removed");
-      loadAutosyncJobs();
-    } else {
-      showToast(data.error || "Failed to remove");
-    }
-  } catch (e) {
-    showToast("Failed to remove sync job");
-  }
-}
-
-// Edit modal
-let currentJobs = [];
-
-async function openEditModal(id) {
-  try {
-    const res = await fetch("/api/autosync");
-    const data = await res.json();
-    currentJobs = data.jobs || [];
-    const job = currentJobs.find((j) => j.id === id);
-    if (!job) {
-      showToast("Job not found");
+    if (report.error) {
+      container.innerHTML = `<div class="empty-state">${esc(report.error)}</div>`;
       return;
     }
 
-    document.getElementById("editJobId").value = id;
-    document.getElementById("editJobTitle").textContent =
-      job.title || "Unknown";
-
-    // Rebuild language dropdown based on lang separation setting
-    const langSelect = document.getElementById("editLanguage");
-    langSelect.innerHTML = "";
-    if (langSepEnabled) {
-      const opt = document.createElement("option");
-      opt.value = "All Languages";
-      opt.textContent = "All Languages";
-      langSelect.appendChild(opt);
+    const rows = report.results || [];
+    if (!rows.length) {
+      container.innerHTML = `<div class="empty-state">${t("autosync.no_matches", "No titles from the newest episodes matched your library.")}</div>`;
+      return;
     }
-    ["German Dub", "English Sub", "German Sub"].forEach((l) => {
-      const opt = document.createElement("option");
-      opt.value = l;
-      opt.textContent = l;
-      langSelect.appendChild(opt);
-    });
-    langSelect.value = job.language || "German Dub";
 
-    document.getElementById("editProvider").value = job.provider || "VOE";
-    document.getElementById("editEnabled").value = job.enabled ? "1" : "0";
-
-    // Populate path dropdown
-    const pathSelect = document.getElementById("editPath");
-    while (pathSelect.options.length > 1) pathSelect.remove(1);
-    await loadCustomPathsForEdit();
-    customPathsCache.forEach(function (p) {
-      const opt = document.createElement("option");
-      opt.value = p.id;
-      opt.textContent = p.name + " (" + p.path + ")";
-      pathSelect.appendChild(opt);
-    });
-    pathSelect.value = job.custom_path_id ? String(job.custom_path_id) : "";
-
-    document.getElementById("editOverlay").style.display = "block";
-  } catch (e) {
-    showToast("Failed to load job");
+    container.innerHTML = rows
+      .map((row) => {
+        const detail = row.reason
+          ? esc(row.reason)
+          : row.episodes
+            ? t("autosync.queued_episodes", "{count} episodes queued in {language}", {
+                count: row.episodes,
+                language: row.language || ""
+              })
+            : esc(row.language || "");
+        // A show held twice produces one row per copy, so each has to say which
+        // library and language folder it is talking about.
+        const where = row.where
+          ? `<span class="sync-row-where">${esc(row.where)}</span>`
+          : "";
+        return `
+          <div class="sync-row">
+            <div class="sync-row-main">
+              <span class="sync-row-title">${esc(row.title)}${where}</span>
+              <span class="sync-row-detail">${detail}</span>
+            </div>
+            <span class="status-pill ${STATUS_CLASS[row.status] || "status-queued"}">${esc(statusLabel(row.status))}</span>
+          </div>`;
+      })
+      .join("");
   }
-}
 
-function closeEditModal() {
-  document.getElementById("editOverlay").style.display = "none";
-}
-
-async function saveEdit() {
-  const id = document.getElementById("editJobId").value;
-  const pathVal = document.getElementById("editPath").value;
-  const body = {
-    language: document.getElementById("editLanguage").value,
-    provider: document.getElementById("editProvider").value,
-    enabled: parseInt(document.getElementById("editEnabled").value),
-    custom_path_id: pathVal ? parseInt(pathVal) : null,
-  };
-  try {
-    const res = await fetch("/api/autosync/" + id, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    const data = await res.json();
-    if (data.ok) {
-      showToast("Job updated");
-      closeEditModal();
-      loadAutosyncJobs();
-    } else {
-      showToast(data.error || "Failed to update");
+  async function load() {
+    let data;
+    try {
+      data = await apiFetch("/api/autosync/status");
+    } catch (error) {
+      schedule(false);
+      return;
     }
-  } catch (e) {
-    showToast("Failed to update job");
+
+    // Step 4 of "How it works" describes two different things
+    el("howFill").hidden = Boolean(data.new_only);
+    el("howNewOnly").hidden = !data.new_only;
+
+    el("scheduleValue").textContent = data.schedule || "-";
+    el("lastRun").textContent = formatTime(data.last_run);
+    el("nextRun").textContent = data.running
+      ? t("autosync.running", "Running...")
+      : formatTime(data.next_run);
+
+    const report = data.last_report;
+    el("lastResult").textContent = report && !report.error
+      ? t("autosync.result", "{queued} of {checked} queued", {
+          queued: report.queued,
+          checked: report.checked
+        })
+      : "-";
+
+    renderReport(report);
+
+    syncNowBtn.disabled = Boolean(data.running);
+    syncNowBtn.textContent = data.running
+      ? t("autosync.running", "Running...")
+      : t("autosync.sync_now", "Sync now");
+
+    schedule(data.running);
   }
-}
 
-function showToast(msg) {
-  const t = document.getElementById("toast");
-  t.textContent = msg;
-  t.style.display = "block";
-  clearTimeout(t._timer);
-  t._timer = setTimeout(() => {
-    t.style.display = "none";
-  }, 3000);
-}
+  syncNowBtn.addEventListener("click", async () => {
+    syncNowBtn.disabled = true;
+    try {
+      await apiSend("/api/autosync/run", "POST");
+      showToast(t("autosync.started", "Sync started"));
+      schedule(true);
+      load();
+    } catch (error) {
+      showToast(error.message);
+      syncNowBtn.disabled = false;
+    }
+  });
 
-function esc(s) {
-  const d = document.createElement("div");
-  d.textContent = s || "";
-  return d.innerHTML;
-}
+  /* ===== Exclusions ===== */
+  async function loadExclusions() {
+    let data;
+    try {
+      data = await apiFetch("/api/autosync/exclusions");
+    } catch (error) {
+      showToast(error.message);
+      return;
+    }
 
-// Init
-Promise.all([loadSyncSchedule(), loadCustomPathsForEdit()]).then(
-  loadAutosyncJobs,
-);
-setInterval(loadAutosyncJobs, 30000);
+    const rows = data.exclusions || [];
+    excludedUrls = new Set(rows.map((row) => row.series_url));
+    if (!rows.length) {
+      exclusionsBody.innerHTML = `<tr class="empty-row"><td colspan="3">${t("autosync.no_exclusions", "Nothing excluded.")}</td></tr>`;
+      return;
+    }
+
+    exclusionsBody.innerHTML = rows
+      .map(
+        (row) => `
+        <tr>
+          <td>${esc(row.title || "-")}</td>
+          <td><a href="${esc(row.series_url)}" target="_blank" rel="noopener noreferrer">${esc(row.series_url)}</a></td>
+          <td>
+            <button class="btn btn-danger" data-remove="${row.id}">${t("common.remove", "Remove")}</button>
+          </td>
+        </tr>`
+      )
+      .join("");
+  }
+
+  /* ===== Adding an exclusion =====
+     Auto-Sync keys exclusions by series URL, so titles are looked up through
+     the normal aniworld search to get one. */
+  const searchInput = el("excludeSearch");
+  const searchBtn = el("excludeSearchBtn");
+  const searchResults = el("excludeResults");
+
+  async function searchTitles() {
+    const keyword = searchInput.value.trim();
+    if (!keyword) return;
+
+    searchBtn.disabled = true;
+    searchResults.innerHTML = `<div class="empty-state">${t("common.loading", "Loading...")}</div>`;
+    try {
+      const data = await apiSend("/api/search", "POST", {
+        keyword,
+        site: "aniworld"
+      });
+      renderSearchResults(data.results || []);
+    } catch (error) {
+      searchResults.innerHTML = `<div class="empty-state">${esc(error.message)}</div>`;
+    } finally {
+      searchBtn.disabled = false;
+    }
+  }
+
+  function renderSearchResults(results) {
+    if (!results.length) {
+      searchResults.innerHTML = `<div class="empty-state">${t("index.no_results", "No results found.")}</div>`;
+      return;
+    }
+
+    searchResults.innerHTML = results
+      .slice(0, 12)
+      .map((item) => {
+        const already = excludedUrls.has(item.url);
+        const title = decodeEntities(item.title);
+        return `
+          <div class="exclude-result">
+            <span class="exclude-result-title" title="${esc(title)}">${esc(title)}</span>
+            <button class="btn btn-ghost" data-add-url="${esc(item.url)}"
+              data-add-title="${esc(title)}" ${already ? "disabled" : ""}>
+              ${already ? t("autosync.already_excluded", "Excluded") : t("autosync.exclude", "Exclude")}
+            </button>
+          </div>`;
+      })
+      .join("");
+  }
+
+  searchBtn.addEventListener("click", searchTitles);
+  searchInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") searchTitles();
+  });
+
+  searchResults.addEventListener("click", async (event) => {
+    const button = event.target.closest("[data-add-url]");
+    if (!button) return;
+    button.disabled = true;
+    try {
+      await apiSend("/api/autosync/exclusions", "POST", {
+        series_url: button.dataset.addUrl,
+        title: button.dataset.addTitle
+      });
+      showToast(t("autosync.added", "Excluded from Auto-Sync"));
+      button.textContent = t("autosync.already_excluded", "Excluded");
+      await loadExclusions();
+    } catch (error) {
+      showToast(error.message);
+      button.disabled = false;
+    }
+  });
+
+  exclusionsBody.addEventListener("click", async (event) => {
+    const button = event.target.closest("[data-remove]");
+    if (!button) return;
+    try {
+      await apiSend(`/api/autosync/exclusions/${button.dataset.remove}`, "DELETE");
+      loadExclusions();
+    } catch (error) {
+      showToast(error.message);
+    }
+  });
+
+  load();
+  loadExclusions();
+})();

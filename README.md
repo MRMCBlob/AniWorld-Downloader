@@ -1,6 +1,6 @@
 <a id="readme-top"></a>
 
-# AniWorld Downloader v4
+# AniWorld Downloader v5
 
 AniWorld Downloader is a cross-platform app for finding, streaming, and downloading anime, movies, series, and manga. It has a browser-based Web UI, an interactive terminal menu, and a direct CLI for scripts and headless setups.
 
@@ -68,6 +68,8 @@ Full guides and troubleshooting live in the [documentation](https://www.phoenixt
 - Skip intros and outros with AniSkip
 - Organize downloads with custom paths and naming templates
 - Manage a library from the Web UI
+- Drive it from scripts through the JSON API with scoped API keys
+- Restyle the whole UI with custom CSS and a background shader
 - Protect the Web UI with local accounts or OIDC SSO
 - Accept download requests through the optional Discord bot
 - Run locally, in Docker, or as a standalone build
@@ -132,14 +134,11 @@ Configuration is stored in `~/.aniworld/.env` by default. Set `ANIWORLD_INSTALL_
 
 ## Docker
 
-The included Compose file runs the Web UI on port `8080`, keeps config and the
-queue database in a named volume, and stages downloads on your media mount.
+The included Compose file runs the Web UI on port `8080`, keeps app data in a named volume, and saves downloads in `./Downloads`.
 
 ```bash
-cp .env.example .env
-$EDITOR .env
+mkdir -p Downloads
 docker compose up -d
-docker compose ps          # wait for "healthy"
 ```
 
 Open `http://localhost:8080` when the container is ready.
@@ -149,56 +148,137 @@ docker compose logs -f
 docker compose down
 ```
 
-To build the image locally instead of using the published image, change `docker-compose.yaml` to use `build: .`, then run:
+This fork's Compose file builds the image locally so its homelab additions are included:
 
 ```bash
 docker compose up -d --build
 ```
 
-`.env.example` and the comments in [`docker-compose.yaml`](docker-compose.yaml)
-cover volumes, authentication, OIDC, language, provider and naming settings.
+The comments in [`docker-compose.yaml`](docker-compose.yaml) cover authentication, OIDC, the Discord bot, Auto-Sync, the captcha solver, language, provider, naming, and the other common settings. The complete list, including the options that rarely need touching, is in [`src/aniworld/.env.example`](src/aniworld/.env.example).
+
+Most settings changed in the Web UI apply immediately but are gone after `docker compose down`, because they only live in the running container. The settings page marks those sections with *resets after restart*. Put them in the Compose `environment:` block, or keep a full `.env` on the host and mount it in:
+
+```yaml
+env_file:
+  - ./.env
+```
+
+The named volume holds the database (users, API keys, custom paths, Auto-Sync exclusions), your `.env`, and the `custom.css` a theme is saved to, so keep it if you care about any of those.
+
+For Dokploy, use [`docker-compose.dokploy.yaml`](docker-compose.dokploy.yaml). It adds unattended health recovery, safe persistent configuration, storage-mount guarding, automatic retries, the SerienStream direct-IP failover, and optional Sonarr/Radarr/Jellyfin importing plus signed webhooks. See the [Dokploy guide](docs/DOKPLOY.md), [integration guide](docs/INTEGRATIONS.md), and [API reference](docs/API.md).
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
-## Homelab: Sonarr, Radarr & Jellyfin
+## API
 
-Run as a 24/7 service that hands finished downloads to your existing media
-stack. Files are staged, verified, and then imported by Sonarr or Radarr, which
-do the renaming and decide where the file ends up — this container never
-creates library folders of its own.
+Everything the Web UI does is available as JSON. Create a key in **Settings → API Keys**, then send it as `X-API-Key`:
 
-```ini
-# .env
-SONARR_URL=http://sonarr:8989
-SONARR_API_KEY=…
-RADARR_URL=http://radarr:7878
-RADARR_API_KEY=…
-JELLYFIN_URL=http://jellyfin:8096
-JELLYFIN_API_KEY=…
+```bash
+curl -H "X-API-Key: awd_yourkey" http://localhost:8080/api/queue
 ```
 
-Everything is optional. With nothing configured the downloader behaves exactly
-as it always did and finished files stay in the completed folder.
+Keys come in three scopes: **read** (search and browse), **read and download** (also queue and cancel), and **full access** (also settings and library deletion). A key can never create or manage other keys.
 
-| Guide | Covers |
-|---|---|
-| [docs/DOCKER.md](docs/DOCKER.md) | Volumes, Proxmox (VM and LXC), SSHFS mounts, healthcheck, backup, troubleshooting |
-| [docs/DOKPLOY.md](docs/DOKPLOY.md) | Deploying on Dokploy: building to GHCR, service setup, networking with the *arr stack |
-| [docs/INTEGRATIONS.md](docs/INTEGRATIONS.md) | API versions, endpoints, example requests and responses, failure modes |
-| [docs/API.md](docs/API.md) | REST endpoints, API-key auth, monitoring |
-| [docs/WEBHOOKS.md](docs/WEBHOOKS.md) | Events, payloads, signature verification |
+`GET /api/queue` without parameters returns the whole queue, as it always has. Add any of `limit`, `offset`, `status`, `q` or `sort` and you get one page instead, along with `total` and per-status `counts`; paged rows leave out the `episodes` list, which is the largest field and the one the UI never shows.
 
-Highlights:
+```bash
+curl -H "X-API-Key: awd_yourkey" "http://localhost:8080/api/queue?status=failed&limit=25&sort=newest"
+```
 
-- **Download queue** with priorities, exponential retry backoff, a stall
-  watchdog, and resume after a container restart. One failing download never
-  stops the queue.
-- **Automatic detection** of series vs. movie from existing metadata, routed to
-  Sonarr or Radarr accordingly.
-- **REST API** with `X-Api-Key` authentication and a `/api/status` healthcheck
-  that reports whether the queue worker is actually alive.
-- **Webhooks** for `download_started`, `download_completed`, `download_failed`
-  and `import_completed`, with optional HMAC signing and a persistent outbox.
+The full endpoint list, with examples, is on the settings page itself under *Endpoints and examples*, so it always matches the version you are running.
+
+<p align="right">(<a href="#readme-top">back to top</a>)</p>
+
+## Theming
+
+The Web UI can be restyled from **Settings → Appearance**. The stylesheet is global, so it applies to everyone using the instance, and it survives restarts. It is stored as `custom.css` next to your `.env`, which means you can also edit it by hand or mount it into a container.
+
+Paste CSS straight in, or pull in a published theme with one line:
+
+```css
+@import url('https://cdn.jsdelivr.net/gh/you/your-theme@main/theme.css');
+```
+
+The import may sit anywhere in the box; it gets moved to the top on save, because CSS only honours `@import` before any other rule.
+
+> **The URL has to be served as `text/css`.** Browsers refuse to apply a stylesheet sent as `text/plain`, and they do it silently, with nothing in the console. That rules out **pastebin.com**, **raw.githubusercontent.com** and **gist.githubusercontent.com**, which all send `text/plain` with `nosniff`.
+>
+> For a file in a GitHub repo, jsDelivr serves the same content with the right type. Swap the host and put `@` before the branch:
+>
+> ```
+> https://raw.githubusercontent.com/user/repo/main/theme.css   ✗ ignored
+> https://cdn.jsdelivr.net/gh/user/repo@main/theme.css         ✓ works
+> ```
+>
+> The settings page warns you if you paste one of the known-bad hosts, and offers the jsDelivr rewrite.
+
+### Writing a theme
+
+Almost the entire interface is built from CSS variables, so a theme is usually just a list of values rather than a fight with class names. That also means it keeps working when the markup changes.
+
+```css
+:root {
+  --bg: #f5f6f8;
+  --surface: #ffffff;
+  --text: #3f4652;
+  --accent: #e11d48;
+}
+```
+
+Two files in [`themes/`](themes) are the starting point:
+
+| File | What it is |
+| --- | --- |
+| [`themes/template.css`](themes/template.css) | Every variable, its default, and a note on what it affects. Copy it and edit. |
+| [`themes/light.css`](themes/light.css) | A complete light theme, built only from those variables. Fork it or use it as is. |
+
+The variables are a shortcut, not a limit. Custom CSS is ordinary CSS, so animated backdrops, pseudo-element layers and backdrop filters all work. The notes at the bottom of `template.css` cover the four things about this app's markup you need to know before layering effects onto it.
+
+### Surfaces and state
+
+Two empty layers sit behind the page for themes to paint on, so you never have to take over a pseudo-element the app might want back:
+
+```css
+.theme-layer[data-layer="1"] { background: radial-gradient(...); }  /* furthest back */
+.theme-layer[data-layer="2"] { background: url("data:image/svg+xml,...."); }
+```
+
+And `<body>` carries the app's state, which is sturdier than matching internal class names:
+
+| Attribute | Values |
+| --- | --- |
+| `data-page` | `index`, `library`, `autosync`, `settings` |
+| `data-site` | `aniworld`, `sto`, `megakino`, … |
+| `data-queue` | `active`, `idle` (plus `data-queue-count`) |
+| `data-modal` | `open`, `closed` |
+
+```css
+body[data-queue="active"] .theme-layer[data-layer="2"] { opacity: 0.6; }
+```
+
+### Background shader
+
+Settings → Appearance also accepts a **GLSL fragment shader**, painted on a canvas behind everything:
+
+```glsl
+void main() {
+  vec2 uv = gl_FragCoord.xy / u_resolution;
+  fragColor = vec4(uv, 0.5 + 0.5 * sin(u_time), 1.0);
+}
+```
+
+You get `u_resolution`, `u_time` and `fragColor`. It is compiled in your browser before saving, so a mistake comes back as a GLSL error with a line number rather than a black screen.
+
+> **Only GLSL is accepted, never JavaScript.** A fragment shader runs on the GPU with no access to the DOM, cookies, the network or the filesystem, so the worst a hostile one can do is look wrong. That is deliberate: themes are global and can be imported from a remote host, so allowing scripts would turn a theme URL into code execution in every user's session.
+
+It is capped at half a megapixel, paused when the tab is hidden, frozen under `prefers-reduced-motion`, dropped if it fails to compile, and skipped entirely by `?nocss=1`.
+
+### Good to know
+
+- **The sign-in screen is never themed.** Custom CSS is not loaded on the login or first-run setup pages, so a theme cannot restyle the form people type their password into.
+- **Locked yourself out?** If a theme hides the settings page, open `/settings?nocss=1` to load it without custom CSS and clear the box.
+- **Imports are fetched by the browser.** Each visitor's browser loads the URL itself, so the host it sits on sees their IP and can change the theme whenever it likes. Only import URLs you trust.
+- Changing the theme needs an admin account when authentication is on.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
@@ -238,6 +318,13 @@ When reporting a bug, please include:
 
 Pull requests should stay focused and explain the behavior they change. There is no need to dress it up. A clear description and a reproducible test are worth much more.
 
+There is a test suite, run on every push. It covers everything except the stream providers, which are left out on purpose because they depend on live third-party sites:
+
+```bash
+pip install -e ".[test]"
+pytest
+```
+
 ### Contributors
 
 <a href="https://github.com/phoenixthrush/AniWorld-Downloader/graphs/contributors">
@@ -249,6 +336,8 @@ Pull requests should stay focused and explain the behavior they change. There is
 
 - **Tmaster055** (since Oct 21, 2024)  
   [![Wakatime Badge](https://wakatime.com/badge/user/79a1926c-65a1-4f1c-baf3-368712ebbf97/project/5f191c34-1ee2-4850-95c3-8d85d516c449.svg)](https://wakatime.com/badge/user/79a1926c-65a1-4f1c-baf3-368712ebbf97/project/5f191c34-1ee2-4850-95c3-8d85d516c449.svg)
+
+- **Sirox** (since May 13, 2025)
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
@@ -269,8 +358,10 @@ AniWorld Downloader leans on some excellent open-source projects:
 
 ## Other Cool Projects
 
-- [Jellyfin AniWorld Downloader](https://github.com/SiroxCW/Jellyfin-AniWorld-Downloader) by [SiroxCW](https://github.com/SiroxCW), a Jellyfin plugin for browsing and downloading AniWorld content inside your media server
+- [Jellyfin-AniWorld-Downloader](https://github.com/SiroxCW/Jellyfin-AniWorld-Downloader) by [SiroxCW](https://github.com/SiroxCW), a Jellyfin plugin for browsing and downloading AniWorld content inside your media server
+- [AniSeerr](https://github.com/Yezun-hikari/AniSeerr) by [Yezun-hikari](https://github.com/Yezun-hikari), a bridge connecting Seerr with AniWorld-Downloader for requests
 - [AniBridge](https://github.com/Zzackllack/AniBridge) by [Zzackllack](https://github.com/Zzackllack), a small FastAPI bridge between supported catalogues and automation tools
+- [AniLoader](https://github.com/WimWamWom/AniLoader) by [WimWamWom](https://github.com/WimWamWom), a standalone web-based fork of AniWorld-Downloader
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 

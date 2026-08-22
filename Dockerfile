@@ -40,15 +40,11 @@ ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=cache,target=/root/.cache/ms-playwright \
     pip install patchright && \
-    python -m patchright install chromium && \
+    python -m patchright install chromium --no-shell && \
     rm -rf /ms-playwright/ffmpeg-* && \
     find /ms-playwright -name "*.pak*" | grep -vE "(resources|chrome_100|chrome_200|de|en-US|en-GB)\.pak" | xargs -r rm -f && \
-    headless_dir=$(ls -d /ms-playwright/chromium_headless_shell-* | head -n 1) && \
     chrome_dir=$(ls -d /ms-playwright/chromium-* | grep -v headless_shell | head -n 1) && \
-    rm -rf "$headless_dir" && \
-    ln -s "$(basename "$chrome_dir")" "$headless_dir" && \
     chrome_inner_dir=$(ls -d "$chrome_dir"/chrome-* | head -n 1) && \
-    ln -s chrome "$chrome_inner_dir/headless_shell" && \
     arch=$(dpkg --print-architecture) && \
     if [ "$arch" = "amd64" ]; then \
         upx -9 /opt/venv/lib/python3.13/site-packages/patchright/driver/node; \
@@ -100,15 +96,12 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     fi
 
 # Create unprivileged user
-#
-# /tmp/.X11-unix is created here as well: Xvfb will not create it when running
-# unprivileged (the euid != 0 check is hardcoded) and then has nowhere to put
-# its socket, leaving Chromium without a display. The entrypoint recreates it
-# too, for setups that mount /tmp as a tmpfs.
 RUN adduser --disabled-password --gecos "" aniworld \
-    && mkdir -p /config /media/downloads/aniworld/incomplete /media/downloads/aniworld/completed \
-    && mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix \
-    && chown -R aniworld:aniworld /app /home/aniworld /config /media
+    && mkdir -p /config /media/downloads/aniworld/incomplete \
+        /media/downloads/aniworld/completed /tmp/.X11-unix \
+    && chmod 1777 /tmp/.X11-unix \
+    && chown -R aniworld:aniworld /app /config /media/downloads/aniworld \
+        /home/aniworld
 
 # Install minimal system dependencies (xvfb and core Chromium shared libraries) (with cache)
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
@@ -135,21 +128,15 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     libxcb1 \
     libxext6
 
-# Copy virtual env, playwright browsers, and compressed static ffmpeg/ffprobe from builder stage
+# Copy virtual env and playwright browsers from builder stage. ffmpeg is not in
+# here, the runner installs it from apt above.
 COPY --from=builder /opt/venv /opt/venv
 COPY --from=builder /ms-playwright /ms-playwright
-
-# Entrypoint and healthcheck scripts
-COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY docker/entrypoint.sh /usr/local/bin/aniworld-entrypoint
 COPY docker/healthcheck.py /usr/local/bin/healthcheck.py
-RUN chmod +x /usr/local/bin/entrypoint.sh
+RUN chmod 755 /usr/local/bin/aniworld-entrypoint /usr/local/bin/healthcheck.py
 
 # Environments
-#
-# The defaults describe the homelab layout documented in docs/DOCKER.md: the
-# whole media mount at /media, config on its own volume at /config. Config is
-# deliberately not under /media — SQLite over a network mount has unreliable
-# file locking, and the queue database lives there.
 ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -166,16 +153,11 @@ ENV PATH="/opt/venv/bin:$PATH" \
 USER aniworld
 
 EXPOSE 8080
-
 VOLUME ["/config"]
-
-# start-period is generous: the first boot resolves dependencies and warms up
-# the Chromium profile, which takes well over a minute on a small VM.
 HEALTHCHECK --interval=30s --timeout=15s --start-period=120s --retries=3 \
     CMD ["python", "/usr/local/bin/healthcheck.py"]
 
-# Inherited by the final stage
-ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/aniworld-entrypoint"]
 
 
 # ==========================================
@@ -186,10 +168,7 @@ FROM scratch AS final
 # Copy the entire root filesystem from the runner stage to squash all layers
 COPY --from=runner / /
 
-# Redeclare all necessary metadata since scratch starts empty — a squashed
-# stage inherits no ENV, no VOLUME, no HEALTHCHECK and no ENTRYPOINT. Anything
-# added to the runner stage above must be repeated here or it silently
-# disappears from the published image.
+# Redeclare all necessary metadata since scratch starts empty
 ENV PATH="/opt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -208,10 +187,8 @@ WORKDIR /app
 USER aniworld
 
 EXPOSE 8080
-
 VOLUME ["/config"]
-
 HEALTHCHECK --interval=30s --timeout=15s --start-period=120s --retries=3 \
     CMD ["python", "/usr/local/bin/healthcheck.py"]
 
-ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/aniworld-entrypoint"]

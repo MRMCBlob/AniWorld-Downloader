@@ -47,7 +47,9 @@ def no_subscribers():
     events.clear()
 
 
-def make_media(directory, name="Some Show S01E01.mkv", size=postprocess.MIN_MEDIA_BYTES * 2):
+def make_media(
+    directory, name="Some Show S01E01.mkv", size=postprocess.MIN_MEDIA_BYTES * 2
+):
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / name
     path.write_bytes(b"\0" * size)
@@ -251,7 +253,7 @@ def test_finalize_stages_and_imports(roots, healthy_probe, monkeypatch):
 
 
 def test_finalize_fails_before_moving_an_unplayable_file(roots, monkeypatch):
-    incomplete, completed = roots
+    incomplete, _completed = roots
     path = make_media(incomplete / "Show", size=10)
     episode = Episode(path, incomplete)
     monkeypatch.setattr(
@@ -286,7 +288,9 @@ def test_a_failed_import_still_counts_as_a_completed_download(
     assert (completed / "Show" / path.name).exists()
 
 
-def test_jellyfin_is_not_scanned_when_the_import_failed(roots, healthy_probe, monkeypatch):
+def test_jellyfin_is_not_scanned_when_the_import_failed(
+    roots, healthy_probe, monkeypatch
+):
     incomplete, _ = roots
     episode = Episode(make_media(incomplete / "Show"), incomplete)
     monkeypatch.setattr(postprocess, "import_media", lambda *a, **k: {"ok": False})
@@ -346,7 +350,9 @@ def test_a_broken_stage_callback_does_not_break_the_pipeline(
 
 def test_movie_is_routed_by_classification(roots, healthy_probe, monkeypatch):
     incomplete, _ = roots
-    path = make_media(incomplete / "Spirited Away (2001)", name="Spirited Away (2001).mkv")
+    path = make_media(
+        incomplete / "Spirited Away (2001)", name="Spirited Away (2001).mkv"
+    )
     episode = Episode(path, incomplete, is_movie=True)
     episode.series = Series(title="Spirited Away", release_year=2001)
 

@@ -149,9 +149,7 @@ def test_search_uses_the_live_json_api_headers(monkeypatch):
 
     monkeypatch.setattr(http, "sto_get", fake_get)
 
-    assert query_s_to("reacher") == [
-        {"title": "Reacher", "link": "/serie/reacher"}
-    ]
+    assert query_s_to("reacher") == [{"title": "Reacher", "link": "/serie/reacher"}]
     assert seen["url"].endswith("/api/search/suggest")
     assert seen["params"] == {"term": "reacher"}
     assert seen["headers"]["Accept"] == "application/json"
