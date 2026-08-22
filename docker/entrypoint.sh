@@ -46,12 +46,22 @@ start_xvfb() {
     mkdir -p /tmp/.X11-unix 2>/dev/null || true
     chmod 1777 /tmp/.X11-unix 2>/dev/null || true
 
+    # Wait for the display socket instead of sleeping a fixed second: on a busy
+    # host Xvfb can take longer, and Chromium fails hard if it starts first.
+    display_number="$(echo "$DISPLAY" | sed 's/^://; s/\..*$//')"
+    socket="/tmp/.X11-unix/X$display_number"
+    lock="/tmp/.X${display_number}-lock"
+
+    # Docker preserves the container filesystem across a restart. Xvfb itself
+    # is gone at that point, but its socket and lock file can remain under
+    # /tmp; starting against those stale files fails with "Server is already
+    # active" and silently leaves captcha Chromium without a display. This
+    # entrypoint owns this display number, so clear only its two runtime files.
+    rm -f "$socket" "$lock"
+
     Xvfb "$DISPLAY" -screen 0 "$ANIWORLD_XVFB_RESOLUTION" -nolisten tcp &
     xvfb_pid=$!
 
-    # Wait for the display socket instead of sleeping a fixed second: on a busy
-    # host Xvfb can take longer, and Chromium fails hard if it starts first.
-    socket="/tmp/.X11-unix/X$(echo "$DISPLAY" | tr -d ':')"
     i=0
     while [ ! -e "$socket" ] && [ "$i" -lt 50 ]; do
         i=$((i + 1))
