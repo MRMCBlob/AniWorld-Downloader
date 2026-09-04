@@ -93,6 +93,7 @@ class AniworldEpisode:
         selected_path=None,
         selected_language=None,
         selected_provider=None,
+        direct_target=False,
     ):
         if not self.is_valid_aniworld_episode_url(url):
             raise ValueError(f"Invalid AniWorld episode URL: {url}")
@@ -108,6 +109,10 @@ class AniworldEpisode:
         self.__selected_path_param = selected_path
         self.__selected_language_param = selected_language
         self.__selected_provider_param = selected_provider
+        # The Sonarr sync already knows the exact season directory.  In that
+        # mode ``selected_path`` is the final directory, not a library root to
+        # which the normal title/season template should be appended.
+        self.__direct_target = bool(direct_target)
 
         self.__provider_data = None
 
@@ -195,6 +200,9 @@ class AniworldEpisode:
     @property
     def _base_folder(self):
         if self.__base_folder is None:
+            if self.__direct_target:
+                self.__base_folder = Path(self.selected_path)
+                return self.__base_folder
             naming_template = os.getenv("ANIWORLD_NAMING_TEMPLATE", NAMING_TEMPLATE)
             parts = naming_template.split("/")
             if len(parts) <= 1:
@@ -215,6 +223,9 @@ class AniworldEpisode:
     @property
     def _folder_path(self):
         if self.__folder_path is None:
+            if self.__direct_target:
+                self.__folder_path = self._base_folder
+                return self.__folder_path
             naming_template = os.getenv("ANIWORLD_NAMING_TEMPLATE", NAMING_TEMPLATE)
             parts = naming_template.split("/")
             if len(parts) <= 2:

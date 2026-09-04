@@ -1,9 +1,12 @@
 """Download queue and captcha endpoints."""
 
+import os
+from pathlib import Path
+
 from flask import Response, current_app, jsonify, request
 
 from ...logger import get_logger
-from .. import db, worker
+from .. import apikeys, db, worker
 from ..media import mangafire_format
 from ..settings_store import english_sub_disabled
 
@@ -49,6 +52,14 @@ def start_download():
     if not episodes:
         return jsonify({"error": "episodes list is required"}), 400
 
+    if _has_direct_target(episodes) and not _direct_download_authorized():
+        return jsonify({"error": "direct downloads need full access"}), 403
+
+    try:
+        episodes, direct = _normalise_direct_targets(episodes)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
     language = data.get("language", "German Dub")
     if language == "English Sub" and english_sub_disabled():
         return jsonify({"error": "English Sub downloads are disabled"}), 403
@@ -73,11 +84,105 @@ def start_download():
         provider=provider,
         username=_current_username(),
         custom_path_id=data.get("custom_path_id"),
+        source="sonarr" if direct else "manual",
         priority=priority,
         media_type=media_type or None,
     )
     worker.ensure_started()
     return jsonify({"queue_id": queue_id})
+
+
+def _has_direct_target(episodes):
+    return any(
+        isinstance(entry, dict) and entry.get("target_path") for entry in episodes
+    )
+
+
+def _direct_download_authorized():
+    """Dynamic library paths are restricted to administrators.
+
+    A regular write key can enqueue URLs, but choosing an arbitrary destination
+    inside the media mount is deliberately a stronger permission.
+    """
+    key = apikeys.current()
+    if key is not None:
+        return key.get("scope") == "admin"
+    if not current_app.config.get("AUTH_ENABLED", False):
+        return True
+
+    from ..auth import get_current_user
+
+    user = get_current_user()
+    return bool(user and user.get("role") == "admin")
+
+
+def _direct_download_roots():
+    """Directories into which a machine caller may write directly.
+
+    The regular queue only selects paths an administrator already stored in
+    the database.  A Sonarr request carries a dynamic season path, so it gets
+    a separate explicit allow-list rather than becoming an arbitrary file
+    write primitive.
+    """
+    roots = []
+    for raw in os.environ.get("ANIWORLD_DIRECT_DOWNLOAD_ROOTS", "").split(","):
+        raw = raw.strip()
+        if not raw:
+            continue
+        path = Path(raw).expanduser()
+        if path.is_absolute():
+            roots.append(path.resolve(strict=False))
+    return tuple(roots)
+
+
+def _normalise_direct_targets(episodes):
+    """Validate and canonicalise Sonarr's per-episode target directories."""
+    direct = [
+        entry
+        for entry in episodes
+        if isinstance(entry, dict) and entry.get("target_path")
+    ]
+    if not direct:
+        return episodes, False
+    if len(direct) != len(episodes):
+        raise ValueError("direct and regular episodes cannot be mixed")
+
+    roots = _direct_download_roots()
+    if not roots:
+        raise ValueError(
+            "direct downloads are disabled; set ANIWORLD_DIRECT_DOWNLOAD_ROOTS"
+        )
+
+    normalised = []
+    for entry in direct:
+        url = str(entry.get("url") or "").strip()
+        if not url:
+            raise ValueError("every direct episode needs a url")
+        if not url.startswith(("https://aniworld.to/", "http://aniworld.to/")):
+            raise ValueError("direct downloads currently support AniWorld URLs only")
+
+        target = Path(str(entry["target_path"])).expanduser()
+        if not target.is_absolute():
+            raise ValueError("direct target_path must be absolute")
+        target = target.resolve(strict=False)
+        if not any(target == root or root in target.parents for root in roots):
+            allowed = ", ".join(str(root) for root in roots)
+            raise ValueError(f"direct target_path is outside the allowed roots: {allowed}")
+
+        clean = dict(entry)
+        clean["url"] = url
+        clean["target_path"] = str(target)
+        for key in ("sonarr_series_id", "sonarr_episode_id"):
+            if clean.get(key) is None:
+                continue
+            try:
+                clean[key] = int(clean[key])
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"{key} must be an integer") from exc
+            if clean[key] <= 0:
+                raise ValueError(f"{key} must be greater than zero")
+        normalised.append(clean)
+    return normalised, True
 
 
 def _tag_mangafire(episodes, requested_format):

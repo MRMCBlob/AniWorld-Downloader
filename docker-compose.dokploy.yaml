@@ -44,9 +44,9 @@ services:
       # though Dokploy generally recommends ../files: this lives outside the
       # repository, so the fresh git clone on every deploy does not touch it.
       #
-      # Downloads are staged under /media/downloads/aniworld. Where a finished
-      # file finally lands is decided by the root folders configured in Sonarr
-      # and Radarr — this container never creates library folders of its own.
+      # Manual downloads may use /media/downloads/aniworld. Sonarr Wanted sync
+      # writes directly into the final series/season directory under /media,
+      # then asks Sonarr to rescan that series.
       - /media/jellyfin/storagebox:/media
 
       # Config, queue database, logs and the Chromium profile.

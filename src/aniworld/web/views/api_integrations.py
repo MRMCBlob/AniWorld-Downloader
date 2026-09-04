@@ -19,6 +19,8 @@ _STARTED_AT = time.time()
 def register(bp):
     bp.add_url_rule("/status", view_func=status)
     bp.add_url_rule("/sonarr/scan", view_func=sonarr_scan, methods=["POST"])
+    bp.add_url_rule("/sonarr/sync", view_func=sonarr_sync_status, methods=["GET"])
+    bp.add_url_rule("/sonarr/sync", view_func=sonarr_sync, methods=["POST"])
     bp.add_url_rule("/radarr/scan", view_func=radarr_scan, methods=["POST"])
     bp.add_url_rule("/jellyfin/scan", view_func=jellyfin_scan, methods=["POST"])
     bp.add_url_rule("/logs", view_func=logs)
@@ -153,6 +155,31 @@ def _arr_scan(service):
 
 def sonarr_scan():
     return _arr_scan("sonarr")
+
+
+def sonarr_sync_status():
+    from .. import sonarr_sync_service
+
+    return jsonify(sonarr_sync_service.status())
+
+
+def sonarr_sync():
+    from .. import sonarr_sync_service
+
+    data = request.get_json(silent=True) or {}
+    raw_id = data.get("series_id")
+    try:
+        series_ids = [int(raw_id)] if raw_id not in (None, "") else []
+    except (TypeError, ValueError):
+        return jsonify({"error": "series_id must be an integer"}), 400
+    dry_run = data.get("dry_run") is True
+    if not sonarr_sync_service.trigger(
+        series_ids=series_ids,
+        reason="connect" if series_ids else "api",
+        apply=not dry_run,
+    ):
+        return jsonify({"error": "A Sonarr sync is already running"}), 409
+    return jsonify({"ok": True, "started": True, "dry_run": dry_run}), 202
 
 
 def radarr_scan():

@@ -82,6 +82,7 @@ aniworld = [
 
 [project.scripts]
 aniworld = "aniworld.__main__:main"
+aniworld-sonarr-sync = "aniworld.sonarr_sync:main"
 
 [tool.ruff.lint.per-file-ignores]
 # schedule.py works on naive wall-clock datetimes by design: that is what keeps

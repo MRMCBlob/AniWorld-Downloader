@@ -69,6 +69,7 @@ Full guides and troubleshooting live in the [documentation](https://www.phoenixt
 - Organize downloads with custom paths and naming templates
 - Manage a library from the Web UI
 - Drive it from scripts through the JSON API with scoped API keys
+- Fill Sonarr's Wanted -> Missing list nightly, directly in its library folders
 - Restyle the whole UI with custom CSS and a background shader
 - Protect the Web UI with local accounts or OIDC SSO
 - Accept download requests through the optional Discord bot
@@ -165,7 +166,7 @@ env_file:
 
 The named volume holds the database (users, API keys, custom paths, Auto-Sync exclusions), your `.env`, and the `custom.css` a theme is saved to, so keep it if you care about any of those.
 
-For Dokploy, use [`docker-compose.dokploy.yaml`](docker-compose.dokploy.yaml). It adds unattended health recovery, safe persistent configuration, storage-mount guarding, automatic retries, the SerienStream direct-IP failover, and optional Sonarr/Radarr/Jellyfin importing plus signed webhooks. See the [Dokploy guide](docs/DOKPLOY.md), [integration guide](docs/INTEGRATIONS.md), and [API reference](docs/API.md).
+For Dokploy, use [`docker-compose.dokploy.yaml`](docker-compose.dokploy.yaml). It adds unattended health recovery, safe persistent configuration, storage-mount guarding, automatic retries, the SerienStream direct-IP failover, and optional Sonarr/Radarr/Jellyfin importing plus signed webhooks. See the [Dokploy guide](docs/DOKPLOY.md), [integration guide](docs/INTEGRATIONS.md), [Sonarr Wanted sync guide](docs/SONARR_SYNC.md), and [API reference](docs/API.md).
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 

@@ -74,10 +74,11 @@ def no_background_threads(monkeypatch):
     then failed. It shows up as an unrelated test failing on the queue order,
     on a different test each run, and only when the timing lines up.
     """
-    from aniworld.web import autosync, worker
+    from aniworld.web import autosync, sonarr_sync_service, worker
 
     monkeypatch.setattr(worker, "ensure_started", lambda: None)
     monkeypatch.setattr(autosync, "ensure_started", lambda: None)
+    monkeypatch.setattr(sonarr_sync_service, "ensure_started", lambda: None)
 
 
 @pytest.fixture(autouse=True)
@@ -87,9 +88,10 @@ def fresh_autosync_anchor(monkeypatch):
     That moment is remembered in a module global, so without this a test that
     looks at the schedule would fix the anchor for every test after it.
     """
-    from aniworld.web import autosync
+    from aniworld.web import autosync, sonarr_sync_service
 
     monkeypatch.setattr(autosync, "_anchored_at", None)
+    monkeypatch.setattr(sonarr_sync_service, "_anchor", None)
 
 
 @pytest.fixture

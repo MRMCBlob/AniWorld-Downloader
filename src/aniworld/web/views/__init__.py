@@ -47,6 +47,8 @@ ADMIN_ENDPOINTS = {
     "api.create_api_key",
     "api.delete_api_key",
     "api.sonarr_scan",
+    "api.sonarr_sync_status",
+    "api.sonarr_sync",
     "api.radarr_scan",
     "api.jellyfin_scan",
     "api.logs",

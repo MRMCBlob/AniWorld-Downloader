@@ -41,7 +41,7 @@ Health and state. Backs the container `HEALTHCHECK`.
 ```json
 {
   "status": "ok",
-  "version": "5.0.2",
+  "version": "5.0.3",
   "uptime_seconds": 84213.4,
   "worker_running": true,
   "queue": {
@@ -163,6 +163,22 @@ An empty body targets the whole library.
 ```
 
 `503` when the service is not configured, `502` when it is unreachable.
+
+### Sonarr Wanted sync
+
+```bash
+curl -X POST -H "X-Api-Key: $KEY" -H 'Content-Type: application/json' \
+  -d '{}' http://localhost:8080/api/sonarr/sync
+```
+
+The endpoint starts the Wanted -> Missing sync in the background and returns
+HTTP `202`. Pass `{"series_id": 7}` to limit it to one series (used by the
+Sonarr Connect hook), or `{"dry_run": true}` to build a plan without queueing.
+`GET /api/sonarr/sync` returns the schedule, next run and last report. Both
+routes require full/admin access when authentication is enabled.
+
+The complete setup, direct-library path restrictions and midnight scheduler
+are documented in [SONARR_SYNC.md](SONARR_SYNC.md).
 
 ### `GET /api/logs`
 

@@ -163,6 +163,72 @@ def test_download_rejects_an_unknown_media_type(client):
     assert response.status_code == 400
 
 
+def test_direct_download_requires_an_explicit_allowed_root(client, monkeypatch):
+    monkeypatch.delenv("ANIWORLD_DIRECT_DOWNLOAD_ROOTS", raising=False)
+
+    response = client.post(
+        "/api/download",
+        json={
+            "episodes": [
+                {
+                    "url": "https://aniworld.to/anime/stream/show/staffel-1/episode-1",
+                    "target_path": "/media/anime/Show/Season 01",
+                    "sonarr_series_id": 7,
+                }
+            ]
+        },
+    )
+
+    assert response.status_code == 400
+    assert "ANIWORLD_DIRECT_DOWNLOAD_ROOTS" in response.get_json()["error"]
+
+
+def test_direct_download_is_limited_to_the_allowed_tree(
+    client, isolated_db, monkeypatch, tmp_path
+):
+    allowed = tmp_path / "anime"
+    monkeypatch.setenv("ANIWORLD_DIRECT_DOWNLOAD_ROOTS", str(allowed))
+    target = allowed / "Show" / "Season 01"
+
+    response = client.post(
+        "/api/download",
+        json={
+            "title": "Show",
+            "media_type": "series",
+            "episodes": [
+                {
+                    "url": "https://aniworld.to/anime/stream/show/staffel-1/episode-1",
+                    "target_path": str(target),
+                    "sonarr_series_id": "7",
+                    "sonarr_episode_id": "42",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    row = isolated_db.get_queue_item(response.get_json()["queue_id"])
+    assert row["source"] == "sonarr"
+    entry = __import__("json").loads(row["episodes"])[0]
+    assert entry["target_path"] == str(target.resolve())
+    assert entry["sonarr_series_id"] == 7
+    assert entry["sonarr_episode_id"] == 42
+
+    escaped = client.post(
+        "/api/download",
+        json={
+            "episodes": [
+                {
+                    "url": "https://aniworld.to/anime/stream/show/staffel-1/episode-2",
+                    "target_path": str(tmp_path / "outside"),
+                }
+            ]
+        },
+    )
+    assert escaped.status_code == 400
+    assert "outside the allowed roots" in escaped.get_json()["error"]
+
+
 # --------------------------------------------------------------------------- #
 # Scans
 # --------------------------------------------------------------------------- #
@@ -251,6 +317,66 @@ def test_an_unreachable_service_becomes_a_502(client, monkeypatch):
 
     assert response.status_code == 502
     assert "connection refused" in response.get_json()["error"]
+
+
+def test_sonarr_sync_endpoint_starts_one_series(client, monkeypatch):
+    from aniworld.web import sonarr_sync_service
+
+    calls = []
+    monkeypatch.setattr(
+        sonarr_sync_service,
+        "trigger",
+        lambda **kwargs: calls.append(kwargs) or True,
+    )
+
+    response = client.post("/api/sonarr/sync", json={"series_id": 7})
+
+    assert response.status_code == 202
+    assert calls == [{"series_ids": [7], "reason": "connect", "apply": True}]
+
+
+def test_sonarr_sync_endpoint_supports_a_dry_run(client, monkeypatch):
+    from aniworld.web import sonarr_sync_service
+
+    calls = []
+    monkeypatch.setattr(
+        sonarr_sync_service,
+        "trigger",
+        lambda **kwargs: calls.append(kwargs) or True,
+    )
+
+    response = client.post("/api/sonarr/sync", json={"dry_run": True})
+
+    assert response.status_code == 202
+    assert calls == [{"series_ids": [], "reason": "api", "apply": False}]
+
+
+def test_sonarr_sync_endpoint_rejects_bad_or_overlapping_requests(
+    client, monkeypatch
+):
+    from aniworld.web import sonarr_sync_service
+
+    assert (
+        client.post("/api/sonarr/sync", json={"series_id": "seven"}).status_code
+        == 400
+    )
+    monkeypatch.setattr(sonarr_sync_service, "trigger", lambda **kwargs: False)
+    assert client.post("/api/sonarr/sync", json={}).status_code == 409
+
+
+def test_sonarr_sync_status_is_exposed(client, monkeypatch):
+    from aniworld.web import sonarr_sync_service
+
+    monkeypatch.setattr(
+        sonarr_sync_service,
+        "status",
+        lambda: {"enabled": True, "running": False, "next_run": "midnight"},
+    )
+
+    response = client.get("/api/sonarr/sync")
+
+    assert response.status_code == 200
+    assert response.get_json()["next_run"] == "midnight"
 
 
 # --------------------------------------------------------------------------- #

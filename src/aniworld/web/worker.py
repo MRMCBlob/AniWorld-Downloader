@@ -158,6 +158,9 @@ def _episode_request(entry):
         extra["selected_pages"] = entry["selected_pages"]
     if entry.get("series_url"):
         extra["_series_url"] = entry["series_url"]
+    for key in ("target_path", "sonarr_series_id", "sonarr_episode_id"):
+        if entry.get(key) is not None:
+            extra[key] = entry[key]
     extra["_format"] = entry.get("mangafire_format", mangafire_format())
     return url, extra
 
@@ -184,7 +187,13 @@ def _build_episode(url, extra, item, selected_path):
         kwargs["series"] = series
     if "selected_pages" in extra:
         kwargs["selected_pages"] = extra["selected_pages"]
-    if selected_path:
+    direct_target = extra.get("target_path")
+    if direct_target:
+        if provider.name != "AniWorld":
+            raise ValueError("direct target paths currently support AniWorld only")
+        kwargs["selected_path"] = direct_target
+        kwargs["direct_target"] = True
+    elif selected_path:
         kwargs["selected_path"] = selected_path
 
     return provider, provider.episode_cls(**kwargs)
@@ -237,9 +246,12 @@ def _process(item):
                     raise TimeoutError(
                         f"no progress for {_stall_timeout()}s; download aborted"
                     )
+                if extra.get("target_path"):
+                    _verify_direct_download(item, episode, extra)
+                    imported_count += 1
                 # MangaFire produces pages/archives, not video files that Sonarr,
                 # Radarr or ffprobe can handle.
-                if (
+                elif (
                     getattr(provider, "name", "") != "MangaFire"
                     and _postprocess_enabled()
                     and _run_postprocess(item, episode)
@@ -308,7 +320,22 @@ def _finish_queue_item(item, entries, errors, imported_count):
         db.set_queue_status(queue_id, "failed", last_error=last_error)
         return
 
-    if entries:
+    direct_ids = {
+        entry.get("sonarr_series_id")
+        for entry in entries
+        if isinstance(entry, dict)
+        and entry.get("target_path")
+        and entry.get("sonarr_series_id")
+    }
+    if direct_ids and imported_count:
+        rescan_ok = _rescan_direct_downloads(queue_id, direct_ids)
+        if not rescan_ok:
+            db.set_queue_import_status(queue_id, "rescan_failed")
+        elif imported_count == len(entries):
+            db.set_queue_import_status(queue_id, "imported")
+        else:
+            db.set_queue_import_status(queue_id, "partial")
+    elif entries:
         if imported_count == len(entries):
             db.set_queue_import_status(queue_id, "imported")
         elif imported_count:
@@ -321,6 +348,57 @@ def _finish_queue_item(item, entries, errors, imported_count):
 
     if item.get("source") == "discord":
         _notify_discord(item)
+
+
+def _verify_direct_download(item, episode, entry):
+    """Verify a file written straight into Sonarr's library tree."""
+    path = postprocess._episode_path(episode)
+    if path is None:
+        raise RuntimeError("could not determine the direct download path")
+    ok, detail = postprocess.verify_media(path)
+    if not ok:
+        raise RuntimeError(f"verification failed: {detail}")
+
+    season = episode_number = None
+    try:
+        season = getattr(getattr(episode, "season", None), "season_number", None)
+        episode_number = getattr(episode, "episode_number", None)
+    except Exception:
+        pass
+    events.emit(
+        events.DOWNLOAD_COMPLETED,
+        type="series",
+        title=item.get("title"),
+        season=season,
+        episode=episode_number,
+        path=str(path),
+        queue_id=item.get("id"),
+        extra={"sonarr_episode_id": entry.get("sonarr_episode_id")},
+    )
+
+
+def _rescan_direct_downloads(queue_id, series_ids):
+    """Tell Sonarr to index files that are already in their final folders."""
+    try:
+        from ..integrations import get_sonarr
+
+        client = get_sonarr()
+        if not client.configured:
+            logger.warning("Queue item %s cannot rescan Sonarr: not configured", queue_id)
+            return False
+        for series_id in sorted(series_ids):
+            result = client.rescan_series(series_id)
+            if (result.get("status") or "").lower() != "completed":
+                logger.warning(
+                    "Sonarr rescan for series %s ended as %s",
+                    series_id,
+                    result.get("status") or "unknown",
+                )
+                return False
+        return True
+    except Exception as exc:
+        logger.warning("Queue item %s could not rescan Sonarr: %s", queue_id, exc)
+        return False
 
 
 def _run_postprocess(item, episode):

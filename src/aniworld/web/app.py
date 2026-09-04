@@ -8,7 +8,15 @@ from flask import Flask, jsonify, redirect, request, url_for
 from flask_wtf.csrf import CSRFProtect
 
 from ..logger import get_logger
-from . import apikeys, autosync, db, settings_store, theming, worker
+from . import (
+    apikeys,
+    autosync,
+    db,
+    settings_store,
+    sonarr_sync_service,
+    theming,
+    worker,
+)
 from .version import get_version
 from .views import ADMIN_ENDPOINTS, register_blueprints
 
@@ -230,6 +238,7 @@ def _start_background_services():
     _wire_captcha_hooks()
     _ensure_queue_worker()
     autosync.ensure_started()
+    sonarr_sync_service.ensure_started()
     _start_webhooks()
     try:
         from .discord_bot import start_if_enabled

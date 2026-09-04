@@ -69,6 +69,11 @@ order. The adapter always sends the plural.
 
 ## Sonarr
 
+To make Sonarr's **Wanted -> Missing** list drive AniWorld downloads on a
+nightly schedule, including direct writes to Sonarr's real season folders, see
+[SONARR_SYNC.md](SONARR_SYNC.md). The import flow below remains available for
+ordinary downloads that do not originate from that sync.
+
 ### Endpoints used
 
 | Method | Path | Purpose |

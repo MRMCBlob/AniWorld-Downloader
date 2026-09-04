@@ -68,12 +68,18 @@ def test_a_dict_entry_keeps_its_extras():
             "selected_pages": [1, 2],
             "series_url": "https://x",
             "mangafire_format": "pdf",
+            "target_path": "/media/anime/Show/Season 01",
+            "sonarr_series_id": 7,
+            "sonarr_episode_id": 42,
         }
     )
     assert url == "https://x/ep1", "surrounding whitespace is trimmed"
     assert extra["selected_pages"] == [1, 2]
     assert extra["_series_url"] == "https://x"
     assert extra["_format"] == "pdf"
+    assert extra["target_path"] == "/media/anime/Show/Season 01"
+    assert extra["sonarr_series_id"] == 7
+    assert extra["sonarr_episode_id"] == 42
 
 
 def test_a_missing_format_falls_back_to_the_setting(monkeypatch):
@@ -306,6 +312,58 @@ def test_a_custom_path_deleted_while_queued_falls_back(
     db.set_queue_status(queue_id, "running")
     calls = run_worker(queue_id)
     assert calls[0]["selected_path"] == str(downloads)
+
+
+def test_a_direct_download_is_verified_and_rescanned(
+    queue_item, run_worker, monkeypatch, tmp_path
+):
+    entry = {
+        "url": "https://aniworld.to/anime/stream/show/staffel-1/episode-1",
+        "target_path": str(tmp_path / "Show" / "Season 01"),
+        "sonarr_series_id": 7,
+        "sonarr_episode_id": 42,
+    }
+    queue_id = queue_item(episodes=[entry], source="sonarr", media_type="series")
+    db.set_queue_status(queue_id, "running")
+    verified = []
+    rescanned = []
+    monkeypatch.setattr(
+        worker,
+        "_verify_direct_download",
+        lambda item, episode, extra: verified.append(extra["sonarr_episode_id"]),
+    )
+    monkeypatch.setattr(
+        worker,
+        "_rescan_direct_downloads",
+        lambda item_id, ids: rescanned.append((item_id, ids)) or True,
+    )
+
+    calls = run_worker(queue_id)
+
+    assert calls[0]["extra"]["target_path"] == entry["target_path"]
+    assert verified == [42]
+    assert rescanned == [(queue_id, {7})]
+    item = db.get_queue_item(queue_id)
+    assert item["status"] == "completed"
+    assert item["import_status"] == "imported"
+
+
+def test_a_failed_direct_rescan_keeps_the_download(queue_item, run_worker, monkeypatch):
+    entry = {
+        "url": "https://aniworld.to/anime/stream/show/staffel-1/episode-1",
+        "target_path": "/media/anime/Show/Season 01",
+        "sonarr_series_id": 7,
+    }
+    queue_id = queue_item(episodes=[entry], source="sonarr", media_type="series")
+    db.set_queue_status(queue_id, "running")
+    monkeypatch.setattr(worker, "_verify_direct_download", lambda *args: None)
+    monkeypatch.setattr(worker, "_rescan_direct_downloads", lambda *args: False)
+
+    run_worker(queue_id)
+
+    item = db.get_queue_item(queue_id)
+    assert item["status"] == "completed"
+    assert item["import_status"] == "rescan_failed"
 
 
 # ---------------------------------------------------------------------------

@@ -226,6 +226,45 @@ def test_api_key_is_sent_as_header():
     assert session.calls[0]["headers"]["X-Api-Key"] == "key123"
 
 
+def test_sync_metadata_uses_episodefile_and_naming_endpoints():
+    client, session = make_client(
+        {
+            ("GET", "/api/v3/episodefile"): FakeResponse(
+                200, [{"id": 2, "seasonNumber": 1, "relativePath": "Season 01/x.mkv"}]
+            ),
+            ("GET", "/api/v3/config/naming"): FakeResponse(
+                200, {"seasonFolderFormat": "Season {season:00}"}
+            ),
+        }
+    )
+
+    assert client.episode_files(7)[0]["id"] == 2
+    assert client.naming_config()["seasonFolderFormat"] == "Season {season:00}"
+    assert session.last_call_to("GET", "/api/v3/episodefile")["params"] == {
+        "seriesId": 7
+    }
+
+
+def test_wanted_missing_reads_every_page():
+    def page(params, **_kwargs):
+        number = params["page"]
+        return FakeResponse(
+            200,
+            {
+                "page": number,
+                "totalRecords": 2,
+                "records": [{"id": number, "seriesId": 7}],
+            },
+        )
+
+    client, session = make_client({("GET", "/api/v3/wanted/missing"): page})
+
+    assert [item["id"] for item in client.wanted_missing(page_size=1)] == [1, 2]
+    calls = session.calls_to("GET", "/api/v3/wanted/missing")
+    assert [call["params"]["page"] for call in calls] == [1, 2]
+    assert calls[0]["params"]["monitored"] is True
+
+
 def test_bad_api_key_raises_immediately():
     client, session = make_client(
         {("GET", "/api/v3/series"): FakeResponse(401, text="nope")}

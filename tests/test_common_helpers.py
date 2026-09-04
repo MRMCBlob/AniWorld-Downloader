@@ -107,6 +107,27 @@ def test_resolution_placeholder_is_used_in_aniworld_filename(monkeypatch, tmp_pa
     assert episode._episode_path.name == "Seriesname.S01E001.720p.English Dub.mp4"
 
 
+def test_direct_aniworld_target_is_the_exact_final_directory(monkeypatch, tmp_path):
+    monkeypatch.setenv(
+        "ANIWORLD_NAMING_TEMPLATE",
+        "{title} ({year})/Season {season}/{title} S{season}E{episode}.mkv",
+    )
+    target = tmp_path / "Shows" / "Seriesname" / "Staffel 01"
+    episode = AniworldEpisode(
+        "https://aniworld.to/anime/stream/seriesname/staffel-1/episode-1",
+        series=SimpleNamespace(title_cleaned="Seriesname", release_year="2026", imdb=""),
+        season=SimpleNamespace(season_number=1),
+        episode_number=1,
+        selected_path=target,
+        selected_language="German Dub",
+        direct_target=True,
+    )
+
+    assert episode._folder_path == target
+    assert episode._episode_path.parent == target
+    assert episode._episode_path.name == "Seriesname S01E001.mkv"
+
+
 def test_pending_resolution_is_hidden_from_progress(monkeypatch, tmp_path):
     monkeypatch.setenv(
         "ANIWORLD_NAMING_TEMPLATE",

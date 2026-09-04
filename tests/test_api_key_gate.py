@@ -143,6 +143,30 @@ def test_a_write_key_can_queue_a_download(client, api_key):
     assert db.get_queue_item(response.get_json()["queue_id"])["title"] == "Naruto"
 
 
+def test_a_write_key_cannot_choose_a_direct_library_path(
+    client, api_key, monkeypatch, tmp_path
+):
+    root = tmp_path / "Shows"
+    monkeypatch.setenv("ANIWORLD_DIRECT_DOWNLOAD_ROOTS", str(root))
+    raw, _ = api_key(scope="write")
+    response = client.post(
+        "/api/download",
+        json={
+            "episodes": [
+                {
+                    "url": "https://aniworld.to/anime/stream/show/staffel-1/episode-1",
+                    "target_path": str(root / "Show" / "Season 01"),
+                }
+            ]
+        },
+        headers=headers(raw),
+    )
+
+    assert response.status_code == 403
+    assert "full access" in response.get_json()["error"]
+    assert db.get_queue() == []
+
+
 @pytest.mark.parametrize(
     "method,path",
     [
@@ -189,6 +213,29 @@ def test_an_admin_key_can_add_a_custom_path(client, api_key, tmp_path):
     )
     assert response.status_code == 200
     assert len(db.get_custom_paths()) == 1
+
+
+def test_an_admin_key_can_choose_an_allowed_direct_library_path(
+    client, api_key, monkeypatch, tmp_path
+):
+    root = tmp_path / "Shows"
+    monkeypatch.setenv("ANIWORLD_DIRECT_DOWNLOAD_ROOTS", str(root))
+    raw, _ = api_key(scope="admin")
+    response = client.post(
+        "/api/download",
+        json={
+            "episodes": [
+                {
+                    "url": "https://aniworld.to/anime/stream/show/staffel-1/episode-1",
+                    "target_path": str(root / "Show" / "Season 01"),
+                }
+            ]
+        },
+        headers=headers(raw),
+    )
+
+    assert response.status_code == 200
+    assert db.get_queue_item(response.get_json()["queue_id"])["source"] == "sonarr"
 
 
 # ---------------------------------------------------------------------------

@@ -11,6 +11,9 @@ services:
     volumes:
       # Persist downloads on the host so they survive container recreation.
       - ./Downloads:/media/downloads/aniworld
+      # For direct Sonarr Wanted sync, also mount the Shows library writable
+      # and set ANIWORLD_DIRECT_DOWNLOAD_ROOTS to its container path.
+      # - /host/path/to/Shows:/media/Shows
       # Persist application config and auth database across restarts. This holds
       # the database (users, API keys, custom paths, Auto-Sync exclusions), your
       # .env, and the custom.css / custom.frag a theme is saved to. Losing this
@@ -61,6 +64,9 @@ services:
     #   ANIWORLD_AUTOSYNC_MODE: "interval"            # When Auto-Sync runs: interval (every so often) | cron (fixed times)
     #   ANIWORLD_AUTOSYNC_INTERVAL: "24h"             # Interval mode: 24h | 6h | 90m | 1h30m (a bare number means hours)
     #   ANIWORLD_AUTOSYNC_CRON: "0 3 * * *"           # Cron mode, local time. Plain language works too ("every monday, friday at 10pm")
+    #   ANIWORLD_SONARR_SYNC_ENABLED: "0"             # Sonarr Wanted -> Missing drives direct library downloads
+    #   ANIWORLD_SONARR_SYNC_CRON: "0 0 * * *"        # Nightly at midnight in the container's local timezone
+    #   ANIWORLD_DIRECT_DOWNLOAD_ROOTS: "/media/Shows" # Allow-list for Sonarr's dynamic season targets
     #   MANGAFIRE_FORMAT: "jpg"                       # MangaFire output: jpg (images) | cbz (archive)
     #   ANIWORLD_KINOX_DOMAIN: ""                     # Override the Kinox domain if the default one is unreachable
 

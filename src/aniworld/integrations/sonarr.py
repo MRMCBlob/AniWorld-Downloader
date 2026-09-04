@@ -139,6 +139,51 @@ class SonarrClient(ServarrClient):
         result = self.get(self.api("/episode"), params=params)
         return result if isinstance(result, list) else []
 
+    def episode_files(self, series_id):
+        """Files Sonarr already knows for a series.
+
+        Their relative directories are the most reliable source for custom or
+        translated season-folder names when the sync chooses a direct target.
+        """
+        result = self.get(
+            self.api("/episodefile"), params={"seriesId": int(series_id)}
+        )
+        return result if isinstance(result, list) else []
+
+    def naming_config(self):
+        result = self.get(self.api("/config/naming"))
+        return result if isinstance(result, dict) else {}
+
+    def wanted_missing(self, page_size=1000):
+        """Every record shown on Sonarr's Wanted -> Missing page.
+
+        The endpoint is paginated even when the UI looks like one list.  Read
+        every page so a large library cannot silently leave older gaps out of
+        the nightly sync.
+        """
+        records = []
+        page = 1
+        while True:
+            result = self.get(
+                self.api("/wanted/missing"),
+                params={
+                    "page": page,
+                    "pageSize": int(page_size),
+                    "sortKey": "airDateUtc",
+                    "sortDirection": "ascending",
+                    "includeSeries": False,
+                    "monitored": True,
+                },
+            )
+            if not isinstance(result, dict):
+                return records
+            batch = result.get("records") or []
+            records.extend(batch)
+            total = int(result.get("totalRecords") or len(records))
+            if not batch or len(records) >= total:
+                return records
+            page += 1
+
     # ------------------------------------------------------------------ #
     # Commands
     # ------------------------------------------------------------------ #
