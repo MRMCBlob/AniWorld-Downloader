@@ -637,6 +637,10 @@
                   <td data-i18n="settings.api_sync_status">Last run and its report</td></tr>
                 <tr><td><code>POST /api/autosync/run</code></td><td>full</td>
                   <td data-i18n="settings.api_sync_run">Start a sync right now</td></tr>
+                <tr><td><code>GET /api/sonarr/sync</code></td><td>full</td>
+                  <td data-i18n="settings.api_sonarr_sync_status">Nightly schedule, next run and last report</td></tr>
+                <tr><td><code>POST /api/sonarr/sync</code></td><td>full</td>
+                  <td data-i18n="settings.api_sonarr_sync_run">Start Wanted -&gt; Missing sync; optional series_id or dry_run</td></tr>
                 <tr><td><code>GET /api/settings</code></td><td>full</td>
                   <td data-i18n="settings.api_settings">Read the current settings</td></tr>
               </tbody>
@@ -664,6 +668,12 @@
               The episode URLs come from /api/episodes, and /api/providers tells you which hosters carry the language you
               want. Add "custom_path_id" to send a download to one of your custom paths.
             </p>
+
+            <h3 data-i18n="settings.api_example_sonarr_sync">Start Sonarr Wanted sync</h3>
+            <pre class="api-example"><code>curl -X POST http://localhost:8080/api/sonarr/sync \
+    -H "X-API-Key: awd_yourkey" \
+    -H "Content-Type: application/json" \
+    -d '{"dry_run": true}'</code></pre>
           </details>
         </section>
       </section>

@@ -388,9 +388,12 @@
       "settings.api_lib_delete": "Titel, Staffel oder Episode löschen",
       "settings.api_sync_status": "Letzter Lauf und dessen Bericht",
       "settings.api_sync_run": "Sync sofort starten",
+      "settings.api_sonarr_sync_status": "Nachtzeitplan, nächster Lauf und letzter Bericht",
+      "settings.api_sonarr_sync_run": "Wanted -> Missing-Sync starten; series_id oder dry_run sind optional",
       "settings.api_settings": "Aktuelle Einstellungen lesen",
       "settings.api_example_queue": "Warteschlange lesen",
       "settings.api_example_download": "Download starten",
+      "settings.api_example_sonarr_sync": "Sonarr-Wanted-Sync starten",
       "settings.api_example_hint":
         'Die Episoden-URLs kommen von /api/episodes, und /api/providers zeigt dir, welche Hoster die gewünschte Sprache haben. Mit "custom_path_id" landet der Download in einem deiner eigenen Pfade.'
     }

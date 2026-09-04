@@ -277,6 +277,13 @@ def test_the_settings_page_renders(client):
     assert client.get("/settings").status_code == 200
 
 
+def test_the_settings_page_documents_sonarr_wanted_sync(client):
+    body = client.get("/settings").get_data(as_text=True)
+    assert "<code>GET /api/sonarr/sync</code>" in body
+    assert "<code>POST /api/sonarr/sync</code>" in body
+    assert '"dry_run": true' in body
+
+
 def test_the_library_page_renders(client):
     assert client.get("/library").status_code == 200
 
