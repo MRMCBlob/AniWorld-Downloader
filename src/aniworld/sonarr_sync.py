@@ -1,4 +1,4 @@
-"""Queue Sonarr's missing episodes from AniWorld.
+"""Queue Sonarr's missing episodes from supported streaming sites.
 
 This command is intentionally a one-shot job.  Cron, a systemd timer or the
 orchestrator decides when "nightly" is; the downloader's normal queue remains
@@ -25,6 +25,8 @@ from .integrations import SonarrClient, read_secret, unmap_path
 
 DEFAULT_ANIWORLD_URL = "http://127.0.0.1:8080"
 DEFAULT_MAPPING_FILE = "/config/sonarr-aniworld-map.json"
+DEFAULT_SYNC_SITES = ("aniworld", "sto")
+SUPPORTED_SYNC_SITES = frozenset(DEFAULT_SYNC_SITES)
 ACTIVE_QUEUE_STATES = {"queued", "running", "paused"}
 
 
@@ -76,9 +78,9 @@ class DownloaderClient:
                 f"AniWorld Downloader returned non-JSON for {method} {path}"
             ) from exc
 
-    def search(self, title):
+    def search(self, title, site="aniworld"):
         body = self.request(
-            "POST", "/api/search", payload={"site": "aniworld", "keyword": title}
+            "POST", "/api/search", payload={"site": site, "keyword": title}
         )
         return body.get("results") or []
 
@@ -104,6 +106,23 @@ class DownloaderClient:
 def normalize_title(value):
     text = unicodedata.normalize("NFKD", str(value or "")).casefold()
     return "".join(ch for ch in text if ch.isalnum())
+
+
+def normalize_sync_sites(value):
+    """Return the safe, ordered set of sites the Sonarr matcher may use."""
+    values = value if isinstance(value, (list, tuple)) else str(value or "").split(",")
+    sites = tuple(
+        dict.fromkeys(str(site).strip().casefold() for site in values if str(site).strip())
+    )
+    if not sites:
+        sites = DEFAULT_SYNC_SITES
+    unsupported = [site for site in sites if site not in SUPPORTED_SYNC_SITES]
+    if unsupported:
+        raise SyncError(
+            "SONARR_SYNC_SITES contains unsupported site(s): "
+            + ", ".join(unsupported)
+        )
+    return sites
 
 
 def series_aliases(series):
@@ -154,7 +173,13 @@ def configured_series_url(series, mappings):
     return None
 
 
-def resolve_series_url(series, mappings, downloader, auto_match=True):
+def resolve_series_url(
+    series,
+    mappings,
+    downloader,
+    auto_match=True,
+    sites=DEFAULT_SYNC_SITES,
+):
     configured = configured_series_url(series, mappings)
     if configured:
         return configured, "mapping"
@@ -163,24 +188,22 @@ def resolve_series_url(series, mappings, downloader, auto_match=True):
 
     aliases = series_aliases(series)
     normalised_aliases = {normalize_title(alias) for alias in aliases}
-    exact = {}
-    for alias in aliases:
-        for result in downloader.search(alias):
-            if normalize_title(result.get("title")) in normalised_aliases:
-                url = (result.get("url") or "").strip()
-                if url:
-                    exact[url] = result.get("title") or alias
-        if len(exact) == 1:
-            # An exact hit on the canonical title is enough; avoid doing many
-            # identical site searches for large alternate-title lists.
-            return next(iter(exact)), "exact title"
-        if len(exact) > 1:
-            break
-    if len(exact) == 1:
-        return next(iter(exact)), "exact title"
-    if len(exact) > 1:
-        return None, "ambiguous exact matches"
-    return None, "no exact AniWorld title match"
+    searched_sites = normalize_sync_sites(sites)
+    for site in searched_sites:
+        exact = {}
+        for alias in aliases:
+            for result in downloader.search(alias, site=site):
+                if normalize_title(result.get("title")) in normalised_aliases:
+                    url = (result.get("url") or "").strip()
+                    if url:
+                        exact[url] = result.get("title") or alias
+            if len(exact) == 1:
+                # An exact hit on the canonical title is enough; avoid doing many
+                # identical site searches for large alternate-title lists.
+                return next(iter(exact)), f"exact title ({site})"
+            if len(exact) > 1:
+                return None, f"ambiguous exact matches on {site}"
+    return None, f"no exact title match on {', '.join(searched_sites)}"
 
 
 def parse_airdate(value):
@@ -308,7 +331,7 @@ def active_sonarr_episode_ids(queue_items):
     return ids
 
 
-def _aniworld_episode_index(downloader, series_url, wanted_seasons):
+def _episode_index(downloader, series_url, wanted_seasons):
     seasons = {
         int(item["season_number"]): item
         for item in downloader.seasons(series_url)
@@ -336,6 +359,7 @@ def build_plan(
     include_specials=False,
     series_ids=None,
     auto_match=True,
+    sites=DEFAULT_SYNC_SITES,
     now=None,
     note=print,
 ):
@@ -368,7 +392,11 @@ def build_plan(
             continue
 
         series_url, match_reason = resolve_series_url(
-            series, mappings, downloader, auto_match=auto_match
+            series,
+            mappings,
+            downloader,
+            auto_match=auto_match,
+            sites=sites,
         )
         if not series_url:
             note(
@@ -379,7 +407,9 @@ def build_plan(
 
         wanted_seasons = {int(ep["seasonNumber"]) for ep in missing}
         try:
-            aniworld = _aniworld_episode_index(downloader, series_url, wanted_seasons)
+            available_episodes = _episode_index(
+                downloader, series_url, wanted_seasons
+            )
             known = known_season_directories(
                 series, sonarr.episode_files(series_id)
             )
@@ -391,11 +421,11 @@ def build_plan(
         for episode in missing:
             season_number = int(episode["seasonNumber"])
             episode_number = int(episode["episodeNumber"])
-            source = aniworld.get(season_number, {}).get(episode_number)
+            source = available_episodes.get(season_number, {}).get(episode_number)
             if not source:
                 note(
                     f"SKIP {series.get('title')} S{season_number:02d}E{episode_number:02d}: "
-                    "not available on AniWorld"
+                    "not available on the matched site"
                 )
                 continue
             available = source.get("available_languages") or []
@@ -438,6 +468,7 @@ def run_sync(args, sonarr=None, downloader=None, note=print):
             args.aniworld_url, read_secret("ANIWORLD_API_KEY")
         )
         mappings = load_mappings(args.mapping)
+        sites = normalize_sync_sites(args.sites)
         plan = build_plan(
             sonarr,
             downloader,
@@ -446,6 +477,7 @@ def run_sync(args, sonarr=None, downloader=None, note=print):
             include_specials=args.include_specials,
             series_ids=args.series_id,
             auto_match=not args.no_auto_match,
+            sites=sites,
             note=note,
         )
 
@@ -502,7 +534,8 @@ def parser():
     result = argparse.ArgumentParser(
         description=(
             "Read missing monitored episodes from Sonarr and queue matching "
-            "AniWorld episodes directly into Sonarr's library folders."
+            "episodes from AniWorld or SerienStream directly into Sonarr's "
+            "library folders."
         )
     )
     result.add_argument(
@@ -519,6 +552,11 @@ def parser():
         "--mapping",
         default=os.getenv("SONARR_ANIWORLD_MAP_FILE", DEFAULT_MAPPING_FILE),
         help="JSON file for explicit Sonarr-to-AniWorld title mappings",
+    )
+    result.add_argument(
+        "--sites",
+        default=os.getenv("SONARR_SYNC_SITES", ",".join(DEFAULT_SYNC_SITES)),
+        help="comma-separated search order (supported: aniworld,sto)",
     )
     result.add_argument(
         "--language",

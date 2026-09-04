@@ -189,8 +189,10 @@ def _build_episode(url, extra, item, selected_path):
         kwargs["selected_pages"] = extra["selected_pages"]
     direct_target = extra.get("target_path")
     if direct_target:
-        if provider.name != "AniWorld":
-            raise ValueError("direct target paths currently support AniWorld only")
+        if provider.name not in ("AniWorld", "SerienStream"):
+            raise ValueError(
+                "direct target paths currently support AniWorld and SerienStream only"
+            )
         kwargs["selected_path"] = direct_target
         kwargs["direct_target"] = True
     elif selected_path:

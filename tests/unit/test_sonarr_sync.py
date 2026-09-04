@@ -88,7 +88,7 @@ def test_build_plan_maps_a_missing_episode_to_its_final_folder(monkeypatch):
         def queue(self):
             return []
 
-        def search(self, title):
+        def search(self, title, site="aniworld"):
             return [
                 {
                     "title": "Frieren",
@@ -127,6 +127,46 @@ def test_build_plan_maps_a_missing_episode_to_its_final_folder(monkeypatch):
             "sonarr_episode_id": 42,
         }
     ]
+
+
+def test_exact_title_falls_back_from_aniworld_to_serienstream():
+    calls = []
+
+    class Downloader:
+        def search(self, title, site="aniworld"):
+            calls.append((title, site))
+            if site == "sto":
+                return [
+                    {
+                        "title": "The Mentalist",
+                        "url": "https://serienstream.to/serie/the-mentalist",
+                    }
+                ]
+            return []
+
+    url, reason = sonarr_sync.resolve_series_url(
+        {"id": 52, "title": "The Mentalist"},
+        {},
+        Downloader(),
+    )
+
+    assert url == "https://serienstream.to/serie/the-mentalist"
+    assert reason == "exact title (sto)"
+    assert calls == [("The Mentalist", "aniworld"), ("The Mentalist", "sto")]
+
+
+def test_sync_sites_reject_unsupported_direct_download_sources():
+    assert sonarr_sync.normalize_sync_sites("aniworld,sto,aniworld") == (
+        "aniworld",
+        "sto",
+    )
+
+    try:
+        sonarr_sync.normalize_sync_sites("aniworld,kinox")
+    except sonarr_sync.SyncError as exc:
+        assert "kinox" in str(exc)
+    else:
+        raise AssertionError("unsupported site was accepted")
 
 
 def test_an_active_queue_entry_is_not_planned_again():

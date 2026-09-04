@@ -348,6 +348,32 @@ def test_a_direct_download_is_verified_and_rescanned(
     assert item["import_status"] == "imported"
 
 
+def test_worker_passes_direct_target_to_serienstream(monkeypatch, tmp_path):
+    captured = {}
+
+    class Episode:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    class Provider:
+        name = "SerienStream"
+        episode_cls = Episode
+
+    monkeypatch.setattr(worker, "resolve_provider", lambda url: Provider())
+    target = str(tmp_path / "The Mentalist" / "Season 01")
+
+    provider, _ = worker._build_episode(
+        "https://serienstream.to/serie/the-mentalist/staffel-1/episode-1",
+        {"target_path": target, "_format": "cbz"},
+        {"language": "German Dub", "provider": "VOE"},
+        None,
+    )
+
+    assert provider.name == "SerienStream"
+    assert captured["selected_path"] == target
+    assert captured["direct_target"] is True
+
+
 def test_a_failed_direct_rescan_keeps_the_download(queue_item, run_worker, monkeypatch):
     entry = {
         "url": "https://aniworld.to/anime/stream/show/staffel-1/episode-1",

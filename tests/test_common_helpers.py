@@ -8,6 +8,7 @@ import pytest
 
 from aniworld.models.aniworld_to.episode import AniworldEpisode
 from aniworld.models.common import common as common_module
+from aniworld.models.s_to.episode import SerienstreamEpisode
 from aniworld.models.common.common import (
     DownloadCancelled,
     _download_full_stream,
@@ -126,6 +127,29 @@ def test_direct_aniworld_target_is_the_exact_final_directory(monkeypatch, tmp_pa
     assert episode._folder_path == target
     assert episode._episode_path.parent == target
     assert episode._episode_path.name == "Seriesname S01E001.mkv"
+
+
+def test_direct_serienstream_target_is_the_exact_final_directory(monkeypatch, tmp_path):
+    monkeypatch.setenv(
+        "ANIWORLD_NAMING_TEMPLATE",
+        "{title} ({year})/Season {season}/{title} S{season}E{episode}.mkv",
+    )
+    target = tmp_path / "Shows" / "The Mentalist" / "Season 01"
+    episode = SerienstreamEpisode(
+        "https://serienstream.to/serie/the-mentalist/staffel-1/episode-1",
+        series=SimpleNamespace(
+            title_cleaned="The Mentalist", release_year="2008", imdb=""
+        ),
+        season=SimpleNamespace(season_number=1),
+        episode_number=1,
+        selected_path=target,
+        selected_language="German Dub",
+        direct_target=True,
+    )
+
+    assert episode._folder_path == target
+    assert episode._episode_path.parent == target
+    assert episode._episode_path.name == "The Mentalist S01E001.mkv"
 
 
 def test_pending_resolution_is_hidden_from_progress(monkeypatch, tmp_path):

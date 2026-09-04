@@ -5,6 +5,7 @@ from pathlib import Path
 
 from flask import Response, current_app, jsonify, request
 
+from ...config import ANIWORLD_EPISODE_PATTERN, SERIENSTREAM_EPISODE_PATTERN
 from ...logger import get_logger
 from .. import apikeys, db, worker
 from ..media import mangafire_format
@@ -158,8 +159,13 @@ def _normalise_direct_targets(episodes):
         url = str(entry.get("url") or "").strip()
         if not url:
             raise ValueError("every direct episode needs a url")
-        if not url.startswith(("https://aniworld.to/", "http://aniworld.to/")):
-            raise ValueError("direct downloads currently support AniWorld URLs only")
+        if not any(
+            pattern.fullmatch(url)
+            for pattern in (ANIWORLD_EPISODE_PATTERN, SERIENSTREAM_EPISODE_PATTERN)
+        ):
+            raise ValueError(
+                "direct downloads support AniWorld and SerienStream episode URLs only"
+            )
 
         target = Path(str(entry["target_path"])).expanduser()
         if not target.is_absolute():

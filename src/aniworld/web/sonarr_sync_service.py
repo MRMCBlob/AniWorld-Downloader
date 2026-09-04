@@ -76,6 +76,7 @@ def _options(series_ids=None, apply=True):
         apply=apply,
         aniworld_url=os.getenv("ANIWORLD_URL", DEFAULT_ANIWORLD_URL),
         mapping=os.getenv("SONARR_ANIWORLD_MAP_FILE", DEFAULT_MAPPING_FILE),
+        sites=os.getenv("SONARR_SYNC_SITES", "aniworld,sto"),
         language=os.getenv(
             "SONARR_SYNC_LANGUAGE", os.getenv("ANIWORLD_LANGUAGE", "German Dub")
         ),

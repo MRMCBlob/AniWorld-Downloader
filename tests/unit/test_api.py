@@ -229,6 +229,54 @@ def test_direct_download_is_limited_to_the_allowed_tree(
     assert "outside the allowed roots" in escaped.get_json()["error"]
 
 
+def test_direct_download_accepts_a_serienstream_episode(
+    client, isolated_db, monkeypatch, tmp_path
+):
+    allowed = tmp_path / "shows"
+    target = allowed / "The Mentalist" / "Season 01"
+    monkeypatch.setenv("ANIWORLD_DIRECT_DOWNLOAD_ROOTS", str(allowed))
+
+    response = client.post(
+        "/api/download",
+        json={
+            "title": "The Mentalist",
+            "episodes": [
+                {
+                    "url": (
+                        "https://serienstream.to/serie/the-mentalist/"
+                        "staffel-1/episode-1"
+                    ),
+                    "target_path": str(target),
+                    "sonarr_series_id": 52,
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    row = isolated_db.get_queue_item(response.get_json()["queue_id"])
+    assert row["source"] == "sonarr"
+
+
+def test_direct_download_rejects_other_site_episode_urls(client, monkeypatch, tmp_path):
+    monkeypatch.setenv("ANIWORLD_DIRECT_DOWNLOAD_ROOTS", str(tmp_path))
+
+    response = client.post(
+        "/api/download",
+        json={
+            "episodes": [
+                {
+                    "url": "https://example.com/show/season-1/episode-1",
+                    "target_path": str(tmp_path / "Show"),
+                }
+            ]
+        },
+    )
+
+    assert response.status_code == 400
+    assert "AniWorld and SerienStream" in response.get_json()["error"]
+
+
 # --------------------------------------------------------------------------- #
 # Scans
 # --------------------------------------------------------------------------- #
