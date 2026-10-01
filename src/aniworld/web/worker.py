@@ -34,9 +34,7 @@ def ensure_started():
             return
         _started = True
     db.reset_stale_running()
-    _worker_thread = threading.Thread(
-        target=_run, name="aniworld-queue", daemon=True
-    )
+    _worker_thread = threading.Thread(target=_run, name="aniworld-queue", daemon=True)
     _worker_thread.start()
 
 
@@ -386,7 +384,9 @@ def _rescan_direct_downloads(queue_id, series_ids):
 
         client = get_sonarr()
         if not client.configured:
-            logger.warning("Queue item %s cannot rescan Sonarr: not configured", queue_id)
+            logger.warning(
+                "Queue item %s cannot rescan Sonarr: not configured", queue_id
+            )
             return False
         for series_id in sorted(series_ids):
             result = client.rescan_series(series_id)

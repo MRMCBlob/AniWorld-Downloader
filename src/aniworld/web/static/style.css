@@ -123,14 +123,14 @@
   --site-sto-shadow: 0 2px 8px rgba(56, 189, 248, 0.35);
   --site-megakino-bg: linear-gradient(135deg, #ef4444, #b91c1c);
   --site-megakino-shadow: 0 2px 8px rgba(239, 68, 68, 0.35);
-  --site-cineby-bg: linear-gradient(135deg, #22d3ee, #0891b2);
-  --site-cineby-shadow: 0 2px 8px rgba(34, 211, 238, 0.35);
   --site-kinox-bg: linear-gradient(135deg, #34d399, #059669);
   --site-kinox-shadow: 0 2px 8px rgba(52, 211, 153, 0.35);
   --site-burningseries-bg: linear-gradient(135deg, #fb923c, #ea580c);
   --site-burningseries-shadow: 0 2px 8px rgba(251, 146, 60, 0.35);
   --site-filmpalast-bg: linear-gradient(135deg, #84cc16, #4d7c0f);
   --site-filmpalast-shadow: 0 2px 8px rgba(132, 204, 22, 0.35);
+  --site-filmo-bg: linear-gradient(135deg, #d946ef, #a21caf);
+  --site-filmo-shadow: 0 2px 8px rgba(217, 70, 239, 0.35);
   --site-mangafire-bg: linear-gradient(135deg, #f59e0b, #b45309);
   --site-mangafire-shadow: 0 2px 8px rgba(245, 158, 11, 0.35);
   --site-htv-bg: linear-gradient(135deg, #ff4fa3, #db2777);
@@ -684,11 +684,6 @@ body[data-site="megakino"] {
   --active-site-shadow: var(--site-all-shadow, var(--site-megakino-shadow));
 }
 
-body[data-site="cineby"] {
-  --active-site-bg: var(--site-all-bg, var(--site-cineby-bg));
-  --active-site-shadow: var(--site-all-shadow, var(--site-cineby-shadow));
-}
-
 body[data-site="kinox"] {
   --active-site-bg: var(--site-all-bg, var(--site-kinox-bg));
   --active-site-shadow: var(--site-all-shadow, var(--site-kinox-shadow));
@@ -702,6 +697,11 @@ body[data-site="burningseries"] {
 body[data-site="filmpalast"] {
   --active-site-bg: var(--site-all-bg, var(--site-filmpalast-bg));
   --active-site-shadow: var(--site-all-shadow, var(--site-filmpalast-shadow));
+}
+
+body[data-site="filmo"] {
+  --active-site-bg: var(--site-all-bg, var(--site-filmo-bg));
+  --active-site-shadow: var(--site-all-shadow, var(--site-filmo-shadow));
 }
 
 body[data-site="mangafire"] {
@@ -909,6 +909,12 @@ body[data-site="htv"] {
   flex-wrap: wrap;
   justify-content: center;
   gap: 8px;
+}
+
+/* Stands in for the chips while a site's genre list is on its way */
+.genre-hint {
+  font-size: 0.82rem;
+  color: var(--text-faint);
 }
 
 .genre-chip {
@@ -2883,4 +2889,14 @@ details.advanced summary:hover {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.update-available-badge {
+  background: var(--accent);
+  color: var(--text-strong);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 0.7rem;
+  margin-left: 6px;
+  text-transform: uppercase;
 }

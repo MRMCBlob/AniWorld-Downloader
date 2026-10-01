@@ -41,34 +41,24 @@ class Session:
 def reset_endpoint(monkeypatch):
     monkeypatch.delenv("ANIWORLD_STO_ENDPOINTS", raising=False)
     monkeypatch.setattr(http, "_active_endpoint", None)
+    monkeypatch.setattr(http, "_active_idx", 0)
 
 
-def test_direct_ip_is_primary_and_serienstream_to_is_remembered_as_backup():
-    session = Session(failing={"http://186.2.175.5"})
+def test_legacy_host_falls_back_and_active_domain_is_remembered():
+    session = Session(failing={"https://serienstream.to"})
 
     response = http.sto_get("https://s.to/serie/example", session=session)
 
-    assert response.url == "https://serienstream.to/serie/example"
+    assert response.url == "https://serienstream.cx/serie/example"
     assert [url for url, _ in session.calls] == [
-        "http://186.2.175.5/serie/example",
         "https://serienstream.to/serie/example",
+        "https://serienstream.cx/serie/example",
     ]
 
     session.calls.clear()
     session.failing.clear()
-    http.sto_get("https://serienstream.to/serie/next", session=session)
-    assert session.calls[0][0] == "https://serienstream.to/serie/next"
-
-
-def test_direct_ip_primary_uses_http_not_https():
-    session = Session()
-
-    response = http.sto_get("https://serienstream.to/serie/example", session=session)
-
-    assert response.url == "http://186.2.175.5/serie/example"
-    assert session.calls[0][0].startswith("http://186.2.175.5/")
-    assert "verify" not in session.calls[0][1]
-    assert session.calls[0][1]["headers"]["Accept-Encoding"] == "gzip, deflate"
+    http.sto_get("https://serienstream.cx/serie/next", session=session)
+    assert session.calls[0][0] == "https://serienstream.cx/serie/next"
 
 
 def test_caller_can_override_accept_encoding():
@@ -83,8 +73,8 @@ def test_caller_can_override_accept_encoding():
     assert session.calls[0][1]["headers"] == {"accept-encoding": "identity"}
 
 
-def test_cx_remains_the_last_fallback():
-    session = Session(failing=set(http.DEFAULT_STO_ENDPOINTS[:2]))
+def test_cx_remains_the_last_domain_fallback():
+    session = Session(failing={"https://serienstream.to"})
 
     response = http.sto_get("https://serienstream.to/serie/example", session=session)
 
@@ -166,12 +156,12 @@ def test_endpoints_can_be_changed_without_rebuilding(monkeypatch):
     assert http.sto_endpoints() == ("https://sto.internal.example",)
 
 
-def test_serienstream_models_store_one_consistent_origin(monkeypatch):
+def test_models_keep_the_requested_origin_until_fetched(monkeypatch):
     monkeypatch.setattr(http, "_active_endpoint", "https://serienstream.cx")
 
     series = SerienstreamSeries("https://s.to/serie/example")
 
-    assert series.url == "https://serienstream.cx/serie/example"
+    assert series.url == "https://s.to/serie/example"
 
 
 def test_model_tracks_an_endpoint_selected_during_its_first_fetch(monkeypatch):
@@ -189,16 +179,18 @@ def test_model_tracks_an_endpoint_selected_during_its_first_fetch(monkeypatch):
     assert series.url == "https://serienstream.cx/serie/example"
 
 
-def test_search_uses_the_live_json_api_headers(monkeypatch):
+def test_search_scrapes_the_results_page(monkeypatch):
     seen = {}
 
     class SearchResponse:
-        def json(self):
-            return {
-                "shows": [{"name": "Reacher", "url": "/serie/reacher"}],
-                "people": [],
-                "genres": [],
-            }
+        text = (
+            '<div data-group="shows">'
+            '<a href="/serie/reacher"><h6 class="show-title">Reacher</h6></a>'
+            "</div>"
+        )
+
+        def raise_for_status(self):
+            pass
 
     def fake_get(url, **kwargs):
         seen["url"] = url
@@ -208,7 +200,5 @@ def test_search_uses_the_live_json_api_headers(monkeypatch):
     monkeypatch.setattr(http, "sto_get", fake_get)
 
     assert query_s_to("reacher") == [{"title": "Reacher", "link": "/serie/reacher"}]
-    assert seen["url"].endswith("/api/search/suggest")
+    assert seen["url"].endswith("/suche")
     assert seen["params"] == {"term": "reacher"}
-    assert seen["headers"]["Accept"] == "application/json"
-    assert seen["headers"]["X-Requested-With"] == "XMLHttpRequest"

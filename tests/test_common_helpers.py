@@ -8,7 +8,6 @@ import pytest
 
 from aniworld.models.aniworld_to.episode import AniworldEpisode
 from aniworld.models.common import common as common_module
-from aniworld.models.s_to.episode import SerienstreamEpisode
 from aniworld.models.common.common import (
     DownloadCancelled,
     _download_full_stream,
@@ -27,6 +26,7 @@ from aniworld.models.common.common import (
     get_ffmpeg_progress,
     movie_folder_enabled,
 )
+from aniworld.models.s_to.episode import SerienstreamEpisode
 
 
 # ---------------------------------------------------------------------------
@@ -116,7 +116,9 @@ def test_direct_aniworld_target_is_the_exact_final_directory(monkeypatch, tmp_pa
     target = tmp_path / "Shows" / "Seriesname" / "Staffel 01"
     episode = AniworldEpisode(
         "https://aniworld.to/anime/stream/seriesname/staffel-1/episode-1",
-        series=SimpleNamespace(title_cleaned="Seriesname", release_year="2026", imdb=""),
+        series=SimpleNamespace(
+            title_cleaned="Seriesname", release_year="2026", imdb=""
+        ),
         season=SimpleNamespace(season_number=1),
         episode_number=1,
         selected_path=target,

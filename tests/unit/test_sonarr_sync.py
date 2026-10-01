@@ -1,12 +1,11 @@
 """The nightly Sonarr plan is built without contacting either real service."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from aniworld import sonarr_sync
 from aniworld.web import sonarr_sync_service
 
-
-NOW = datetime(2026, 9, 4, 1, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 9, 4, 1, 0, tzinfo=UTC)
 
 
 def test_missing_episodes_only_keeps_monitored_aired_gaps():
@@ -27,7 +26,9 @@ def test_missing_episodes_only_keeps_monitored_aired_gaps():
         _sonarr_episode(6, 0, 1),
     ]
 
-    assert [item["id"] for item in sonarr_sync.missing_episodes(series, episodes, NOW)] == [2]
+    assert [
+        item["id"] for item in sonarr_sync.missing_episodes(series, episodes, NOW)
+    ] == [2]
 
 
 def test_season_folder_uses_sonarr_format_and_existing_directories(monkeypatch):

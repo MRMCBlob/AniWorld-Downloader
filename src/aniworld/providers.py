@@ -5,48 +5,56 @@ from re import Pattern
 from urllib.parse import urlparse, urlunparse
 
 from .config import (
+    ANIME_ID_HENTAI_EPISODE_PATTERN,
     ANIWORLD_EPISODE_PATTERN,
     ANIWORLD_SEASON_PATTERN,
     ANIWORLD_SERIES_PATTERN,
     BURNINGSERIES_EPISODE_PATTERN,
     BURNINGSERIES_SEASON_PATTERN,
     BURNINGSERIES_SERIES_PATTERN,
-    CINEBY_EPISODE_PATTERN,
-    CINEBY_SERIES_PATTERN,
     FILMPALAST_SERIES_PATTERN,
     HANIME_TV_SERIES_PATTERN,
+    HENTAI_HAVEN_EPISODE_PATTERN,
+    HENTAI_HAVEN_SERIES_PATTERN,
+    HENTAI_TV_EPISODE_PATTERN,
     KINOX_SERIES_PATTERN,
     MANGA_FIRE_CHAPTER_PATTERN,
     MANGA_FIRE_SERIES_PATTERN,
     MEGAKINO_SERIES_PATTERN,
+    MOFLIX_SERIES_PATTERN,
     SERIENSTREAM_EPISODE_PATTERN,
     SERIENSTREAM_SEASON_PATTERN,
     SERIENSTREAM_SERIES_PATTERN,
 )
 from .models import (
+    AnimeIDHentaiEpisode,
     AniworldEpisode,
     AniworldSeason,
     AniworldSeries,
     BurningSeriesEpisode,
     BurningSeriesSeason,
     BurningSeriesSeries,
-    CinebyEpisode,
-    CinebySeason,
-    CinebySeries,
+    FilmoEpisode,
     FilmPalastEpisode,
     HanimeTVEpisode,
     HanimeTVSeason,
     HanimeTVSeries,
+    HentaiHavenEpisode,
+    HentaiHavenSeries,
+    HentaiTVEpisode,
     KinoxEpisode,
     KinoxSeason,
     KinoxSeries,
     MangaFireToChapter,
     MangaFireToSeries,
     MegaKinoEpisode,
+    MoflixEpisode,
+    MoflixSeason,
     SerienstreamEpisode,
     SerienstreamSeason,
     SerienstreamSeries,
 )
+from .models.filmo_to.episode import FILMO_EPISODE_PATTERN
 
 
 @dataclass(frozen=True)
@@ -62,6 +70,23 @@ class Provider:
 
 
 PROVIDERS = [
+    Provider(
+        name="HentaiTV",
+        episode_pattern=HENTAI_TV_EPISODE_PATTERN,
+        episode_cls=HentaiTVEpisode,
+    ),
+    Provider(
+        name="AnimeIDHentai",
+        episode_pattern=ANIME_ID_HENTAI_EPISODE_PATTERN,
+        episode_cls=AnimeIDHentaiEpisode,
+    ),
+    Provider(
+        name="HentaiHaven",
+        series_pattern=HENTAI_HAVEN_SERIES_PATTERN,
+        episode_pattern=HENTAI_HAVEN_EPISODE_PATTERN,
+        series_cls=HentaiHavenSeries,
+        episode_cls=HentaiHavenEpisode,
+    ),
     Provider(
         name="AniWorld",
         series_pattern=ANIWORLD_SERIES_PATTERN,
@@ -85,6 +110,16 @@ PROVIDERS = [
         series_cls=MegaKinoEpisode,
         season_cls=None,
         episode_cls=MegaKinoEpisode,
+    ),
+    Provider(
+        name="Filmo",
+        episode_pattern=FILMO_EPISODE_PATTERN,
+        # A movie page is the whole title, so it stands in as its own series the
+        # way MegaKino and FilmPalast do. No series_pattern: the CLI keeps
+        # treating the URL as an episode, only the web UI asks for the series.
+        series_cls=FilmoEpisode,
+        season_cls=None,
+        episode_cls=FilmoEpisode,
     ),
     Provider(
         name="FilmPalast",
@@ -112,15 +147,6 @@ PROVIDERS = [
         episode_cls=BurningSeriesEpisode,
     ),
     Provider(
-        name="Cineby",
-        series_pattern=CINEBY_SERIES_PATTERN,
-        season_pattern=CINEBY_SERIES_PATTERN,
-        episode_pattern=CINEBY_EPISODE_PATTERN,
-        series_cls=CinebySeries,
-        season_cls=CinebySeason,
-        episode_cls=CinebyEpisode,
-    ),
-    Provider(
         name="MangaFire",
         series_pattern=MANGA_FIRE_SERIES_PATTERN,
         season_pattern=MANGA_FIRE_CHAPTER_PATTERN,
@@ -137,6 +163,14 @@ PROVIDERS = [
         series_cls=SerienstreamSeries,
         season_cls=SerienstreamSeason,
         episode_cls=SerienstreamEpisode,
+    ),
+    Provider(
+        name="Moflix",
+        series_pattern=MOFLIX_SERIES_PATTERN,
+        episode_pattern=MOFLIX_SERIES_PATTERN,
+        series_cls=MoflixEpisode,
+        season_cls=MoflixSeason,
+        episode_cls=MoflixEpisode,
     ),
 ]
 

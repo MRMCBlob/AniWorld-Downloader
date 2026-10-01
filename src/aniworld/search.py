@@ -1,10 +1,19 @@
 import html as html_module
+import json
 import os
 import random
 import re
-from urllib.parse import quote, quote_plus, urljoin
+from html.parser import HTMLParser
+from urllib.parse import quote, quote_plus, unquote, urljoin
 
 import niquests
+
+from .common.search import (
+    limit_reached,
+    limit_results,
+    optional_filters,
+    validate_limit,
+)
 
 try:
     from .ascii import display_ascii_art
@@ -21,45 +30,6 @@ MAX_PAGES = 15
 
 # A genre page lists 30 animes and pages are /genre/<slug>/<n>.
 GENRE_PAGE_SIZE = 30
-
-# Used when the genre list cannot be read off the homepage. Aniworld adds
-# genres very rarely, so a stale copy is better than showing nothing.
-GENRE_FALLBACK = (
-    ("Abenteuer", "abenteuer"),
-    ("Action", "action"),
-    ("Actiondrama", "actiondrama"),
-    ("Actionkomödie", "actionkomoedie"),
-    ("Alltagsleben", "alltagsleben"),
-    ("Alltagsdrama", "alltagsdrama"),
-    ("Boys Love", "boys-love"),
-    ("Drama", "drama"),
-    ("Ecchi", "ecchi"),
-    ("EngSub", "engsub"),
-    ("Erotik", "erotik"),
-    ("Fantasy", "fantasy"),
-    ("Fighting-Shounen", "fighting-shounen"),
-    ("Ganbatte", "ganbatte"),
-    ("Geistergeschichten", "geistergeschichten"),
-    ("Ger", "ger"),
-    ("GerSub", "gersub"),
-    ("Harem", "harem"),
-    ("Horror", "horror"),
-    ("Komödie", "komoedie"),
-    ("Krimi", "krimi"),
-    ("Liebesdrama", "liebesdrama"),
-    ("Magical Girl", "magical-girl"),
-    ("Mecha", "mecha"),
-    ("Mystery", "mystery"),
-    ("Nonsense-Komödie", "nonsense-komoedie"),
-    ("Psychodrama", "psychodrama"),
-    ("Romantische Komödie", "romantische-komoedie"),
-    ("Romanze", "romanze"),
-    ("Scifi", "scifi"),
-    ("Sport", "sport"),
-    ("Thriller", "thriller"),
-    ("Yuri", "yuri"),
-    ("Übermäßige Gewaltdarstellung", "uebermaessige-gewaltdarstellung"),
-)
 
 _homepage_cache = None
 _megakino_homepage_cache = None
@@ -125,8 +95,72 @@ def _relevance_score(title: str, keyword: str) -> int:
     return 4
 
 
-def query_megakino(keyword):
-    """Search MegaKino and return a list of matching results with posters."""
+def _fetch_megakino_page(path):
+    from .models.megakino.series import get_megakino_domain
+
+    base = f"https://{get_megakino_domain()}"
+    headers = {"Accept-Encoding": "identity", "User-Agent": DEFAULT_USER_AGENT}
+    with niquests.Session() as session:
+        session.get(f"{base}/index.php?yg=token", headers=headers, timeout=15)
+        response = session.get(f"{base}{path}", headers=headers, timeout=15)
+        response.raise_for_status()
+        if "location.replace" in response.text or "yg=token" in response.text:
+            response = session.get(f"{base}{path}", headers=headers, timeout=15)
+            response.raise_for_status()
+        return response.text, base
+
+
+def fetch_megakino_genres():
+    """Fetch current genre names and slugs from MegaKino's sidebar."""
+    page, _ = _fetch_megakino_page("/")
+    section = re.search(
+        r'<div\b[^>]*class=["\']side-block__title["\'][^>]*>\s*Genres\s*</div>'
+        r"\s*<ul\b[^>]*>(.*?)</ul>",
+        page,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if not section:
+        return []
+    results = []
+    seen = set()
+    for slug, label in re.findall(
+        r'<a\b[^>]*href=["\']/([^/"\'?#]+)/?["\'][^>]*>(.*?)</a>',
+        section.group(1),
+        re.IGNORECASE | re.DOTALL,
+    ):
+        slug = unquote(html_module.unescape(slug))
+        name = html_module.unescape(re.sub(r"<[^>]+>", "", label)).strip()
+        if name and slug not in seen:
+            seen.add(slug)
+            results.append({"name": name, "slug": slug})
+    return results
+
+
+def query_megakino(keyword="", *, genre=None, limit=None):
+    """Search by keyword, or fetch the first results page for a genre slug.
+
+    Use fetch_megakino_genres() to discover current names and slugs.
+    """
+    validate_limit(limit)
+    if limit == 0:
+        return []
+    if genre:
+        if keyword:
+            raise ValueError("Use either a keyword or a genre, not both.")
+        page, base = _fetch_megakino_page(f"/{quote(genre, safe='')}/")
+        # Every genre page opens with the same promo row of 16 cards, the
+        # genre's own listing only starts at #dle-content. Cut the row off or
+        # each genre reads as the one before it — issue #317.
+        listing = re.search(r"\bid=[\"']dle-content[\"']", page)
+        return limit_results(
+            [
+                {"title": title, "url": url, "poster_url": poster}
+                for title, url, poster in _extract_megakino_cards(
+                    page[listing.start() :] if listing else page, base
+                )
+            ],
+            limit,
+        )
     try:
         from .models.megakino.series import get_megakino_domain
 
@@ -186,10 +220,13 @@ def query_megakino(keyword):
     # the closest title matches surface first.
     titles_links.sort(key=lambda item: _relevance_score(item[0], keyword))
 
-    return [
-        {"title": title, "url": url, "poster_url": poster_url}
-        for title, url, poster_url in titles_links
-    ]
+    return limit_results(
+        [
+            {"title": title, "url": url, "poster_url": poster_url}
+            for title, url, poster_url in titles_links
+        ],
+        limit,
+    )
 
 
 def _extract_megakino_poster_url(inner_html, base_url):
@@ -378,38 +415,45 @@ def fetch_new_episodes():
     block_match = re.search(r'class="newEpisodeList">(.*)', html, re.DOTALL)
     search_html = block_match.group(1) if block_match else html
 
-    # Find all episode links with their surrounding context
-    episode_pattern = re.compile(
-        r'<a\s+href="(/anime/stream/[^"]+/staffel-(\d+)/episode-(\d+))"[^>]*>'
-        r"(.*?)</a>"
-        r'(.*?(?=<a\s+href="/anime/stream/|$))',
-        re.DOTALL,
-    )
-
     seen = {}
     ordered_urls = []
 
-    for m in episode_pattern.finditer(search_html):
-        path, season_str, episode_str, inner, after = m.groups()
+    # Process each episode row individually to prevent matching flags from adjacent episodes
+    rows = re.finditer(
+        r'<div class="col-md-12">(.*?)</div>\s*</div>\s*</div>', search_html, re.DOTALL
+    )
+
+    for row_match in rows:
+        row_html = row_match.group(1)
+
+        # 1. Extract link, season, and episode
+        link_match = re.search(
+            r'<a\s+[^>]*?href="(?:https://aniworld\.to)?(/anime/stream/[^"]+/staffel-(\d+)/episode-(\d+))"[^>]*>',
+            row_html,
+        )
+        if not link_match:
+            continue
+
+        path, season_str, episode_str = link_match.groups()
         url = f"https://aniworld.to{path}"
         season = int(season_str)
         episode = int(episode_str)
 
-        # Extract title from <strong>
-        title_match = re.search(r"<strong>(.*?)</strong>", inner)
-        title = title_match.group(1).strip() if title_match else ""
+        # 2. Extract title
+        title_match = re.search(r"<strong>(.*?)</strong>", row_html, re.DOTALL)
+        import html as html_module
 
-        # Extract date from elementFloatRight span or last span
+        title = (
+            " ".join(html_module.unescape(title_match.group(1)).split())
+            if title_match
+            else ""
+        )
+
+        # 3. Extract date
         date_match = re.search(
-            r'<span[^>]*class="[^"]*elementFloatRight[^"]*"[^>]*>(.*?)</span>',
-            inner,
+            r'<span[^>]*class="[^"]*elementFloatRight[^"]*"[^>]*>(.*?)</span>', row_html
         )
         date = date_match.group(1).strip() if date_match else ""
-
-        # Extract language from flag image data-src
-        context = inner + after
-        flag_match = re.search(r'data-src="[^"]*?/(\w[\w-]*)\.svg"', context)
-        language = flag_match.group(1) if flag_match else ""
 
         if url not in seen:
             seen[url] = {
@@ -422,8 +466,14 @@ def fetch_new_episodes():
             }
             ordered_urls.append(url)
 
-        if language and language not in seen[url]["languages"]:
-            seen[url]["languages"].append(language)
+        # 4. Extract all language flags in this specific row block
+        flags = re.finditer(
+            r'<img[^>]+(?:src|data-src)="[^"]*?/(\w[\w-]*)\.svg"[^>]*>', row_html
+        )
+        for flag_match in flags:
+            lang = flag_match.group(1)
+            if lang and lang not in seen[url]["languages"]:
+                seen[url]["languages"].append(lang)
 
     return [seen[url] for url in ordered_urls]
 
@@ -527,7 +577,7 @@ def _extract_cover_list(html, heading):
 def fetch_genres():
     """Genre names and slugs, read off the genre list at the end of the homepage.
 
-    Returns a list of dicts, falling back to the built in list.
+    Returns the genre names and slugs currently present on the site.
     """
     html = _fetch_homepage()
     genres = []
@@ -548,26 +598,24 @@ def fetch_genres():
                     genres.append({"name": name, "slug": slug})
 
     if not genres:
-        logger.warning("Genre list missing from the homepage, using the built in one")
-        genres = [{"name": name, "slug": slug} for name, slug in GENRE_FALLBACK]
+        logger.warning("Genre list missing from the homepage")
     return genres
 
 
-def fetch_genre_animes(slug, page=1):
+def fetch_genre_animes(slug, page=1, *, limit=None):
     """Fetch one page of a genre listing.
 
-    Returns {"results": [...], "has_more": bool} or None on error.
+    Returns {"results": [...], "has_more": bool}; request errors propagate.
     """
-    url = f"{HOME_URL}/genre/{quote(slug)}"
+    validate_limit(limit)
+    if limit == 0:
+        return {"results": [], "has_more": False}
+    url = f"{HOME_URL}/genre/{quote(slug, safe='')}"
     if page > 1:
         url = f"{url}/{page}"
 
-    try:
-        response = GLOBAL_SESSION.get(url)
-        response.raise_for_status()
-    except Exception as e:
-        logger.error(f"Failed to fetch genre '{slug}' page {page}: {e}")
-        return None
+    response = GLOBAL_SESSION.get(url)
+    response.raise_for_status()
 
     html = response.text
     # Everything before the list is navigation, cut it off so only cards match
@@ -575,7 +623,7 @@ def fetch_genre_animes(slug, page=1):
     results = _parse_cover_items(html[start:] if start != -1 else html)
     # The pager only links to the next page while there is one
     has_more = f"/genre/{slug}/{page + 1}" in html
-    return {"results": results, "has_more": has_more}
+    return {"results": limit_results(results, limit), "has_more": has_more}
 
 
 def fetch_new_animes():
@@ -607,11 +655,13 @@ def _fetch_series_homepage():
         return _series_html_content
 
     try:
-        from .models.s_to.http import sto_get
+        from .models.s_to.http import response_text, sto_get
 
         response = sto_get("https://serienstream.to/beliebte-serien")
         response.raise_for_status()
-        _series_html_content = response.text
+        _series_html_content = response_text(
+            response, "https://serienstream.to/beliebte-serien"
+        )
         return _series_html_content
     except Exception as e:
         logger.error(f"Failed to fetch serienstream.to popular series page: {e}")
@@ -836,36 +886,144 @@ def _normalize_s_to_link(link: str) -> str:
     return link
 
 
-def query_s_to(keyword):
-    """Search serienstream.to for the given keyword and return a list of matching series with their URLs."""
-    from .models.s_to.http import sto_base_url, sto_get
+class _StoSearchParser(HTMLParser):
+    def __init__(self, genre_page=False):
+        super().__init__()
+        self.results = []
+        self.next_url = None
+        self.genre_page = genre_page
+        self.depth = 0
+        self.link = None
+        self.title = None
 
-    # Use query params to ensure proper URL encoding (spaces, umlauts, etc.)
-    url = "https://serienstream.to/api/search/suggest"
-    # Version 2 serves this route only as an XMLHttpRequest. The global
-    # session deliberately carries document-navigation headers, which now
-    # produce a HTML 404 from this otherwise valid endpoint.
-    response = sto_get(
-        url,
-        params={"term": keyword},
-        headers={
-            "Accept": "application/json",
-            "X-Requested-With": "XMLHttpRequest",
-            "Referer": f"{sto_base_url()}/",
-        },
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == "div":
+            if self.depth:
+                self.depth += 1
+            elif attrs.get("data-group") == "shows":
+                self.depth = 1
+        if not self.depth and not self.genre_page:
+            return
+        if tag == "a":
+            href = attrs.get("href", "")
+            if "next" in attrs.get("rel", "").split():
+                self.next_url = href
+            elif href.startswith("/serie/"):
+                self.link = _normalize_s_to_link(href)
+        elif tag == "h6" and (
+            "show-title" in attrs.get("class", "").split()
+            or self.genre_page
+            and "text-truncate" in attrs.get("class", "").split()
+        ):
+            self.title = []
+
+    def handle_data(self, data):
+        if self.title is not None:
+            self.title.append(data)
+
+    def handle_endtag(self, tag):
+        if tag == "h6" and self.title is not None:
+            title = "".join(self.title).strip()
+            if self.link and title:
+                self.results.append({"title": title, "link": self.link})
+            self.link = None
+            self.title = None
+        if tag == "div" and self.depth:
+            self.depth -= 1
+
+
+def _unique_genres(pairs):
+    """Turn (slug, label) matches into unique {"name", "slug"} genre entries.
+
+    Every site prints its genre menu as a list of links or options, only the
+    markup around them differs, so the fetchers below share the cleanup.
+    """
+    results = []
+    seen = set()
+    for slug, label in pairs:
+        slug = unquote(html_module.unescape(slug)).strip().rstrip("/")
+        name = html_module.unescape(re.sub(r"<[^>]+>", "", label)).strip()
+        if slug and slug not in seen:
+            seen.add(slug)
+            results.append({"name": name or slug, "slug": slug})
+    return results
+
+
+def fetch_s_to_genres():
+    """Fetch current genre names and slugs from serienstream.to's homepage.
+
+    The genre pages themselves do not link to their siblings, the footer does.
+    """
+    from .models.s_to.http import response_text, sto_get
+
+    url = "https://serienstream.to/"
+    response = sto_get(url)
+    response.raise_for_status()
+    return _unique_genres(
+        re.findall(
+            r'<a\b[^>]*href=["\'][^"\']*?/genre/([^"\'/?#]+)["\'][^>]*>(.*?)</a>',
+            response_text(response, url),
+            re.IGNORECASE | re.DOTALL,
+        )
     )
 
-    data = response.json()
-    shows = data.get("shows", []) or []
 
+def query_s_to(
+    keyword="",
+    *,
+    genre=None,
+    fsk=None,
+    prod_start=None,
+    prod_end=None,
+    sort=None,
+    limit=None,
+):
+    """Search by keyword, or browse a genre slug with optional site filters.
+
+    Genre browsing accepts fsk, prod_start/prod_end (years), and sort:
+    name_asc, name_desc, latest, release, or ratings_desc.
+    Keyword search cannot be combined with genre filters.
+    """
+    validate_limit(limit)
+    if limit == 0:
+        return []
+    from .models.s_to.http import response_text, sto_get
+
+    url = "https://serienstream.to/suche"
+    filters = optional_filters(
+        fsk=fsk, prod_start=prod_start, prod_end=prod_end, sort=sort
+    )
+    if genre:
+        if keyword:
+            raise ValueError("Use either a keyword or a genre, not both.")
+        url = f"https://serienstream.to/genre/{quote(genre, safe='')}"
+        params = filters
+    else:
+        if filters:
+            raise ValueError("SerienStream filters require a genre.")
+        params = {"term": keyword}
     results = []
-    for show in shows:
-        title = show.get("name", "Unknown Title")
-        link = _normalize_s_to_link(show.get("url", "") or "")
-        if link:
-            results.append({"title": title, "link": link})
-
-    return results
+    seen_links = set()
+    visited = set()
+    while url not in visited:
+        visited.add(url)
+        response = sto_get(url, params=params)
+        response.raise_for_status()
+        parser = _StoSearchParser(genre_page=bool(genre))
+        parser.feed(response_text(response, url))
+        previous_count = len(results)
+        for result in parser.results:
+            if result["link"] not in seen_links:
+                seen_links.add(result["link"])
+                results.append(result)
+        if limit_reached(results, limit):
+            break
+        if len(results) == previous_count or not parser.next_url:
+            break
+        url = urljoin(url, parser.next_url)
+        params = None
+    return limit_results(results, limit)
 
 
 def _clean_search_query(keyword):
@@ -876,12 +1034,53 @@ def _clean_search_query(keyword):
     return cleaned or keyword
 
 
-def query_filmpalast(keyword):
-    """Search filmpalast.to and return a list of movie results with posters."""
+def fetch_filmpalast_genres():
+    """Fetch current genre names and URL slugs from FilmPalast's sidebar."""
+    from .config import FILMPALAST_HOST_PATTERN
+
+    response = GLOBAL_SESSION.get(
+        "https://filmpalast.to/",
+        headers={"Accept-Encoding": "gzip, deflate"},
+        timeout=15,
+    )
+    response.raise_for_status()
+    section = re.search(
+        r"<section\b[^>]*\bid=[\"']genre[\"'][^>]*>(.*?)</section>",
+        response.text,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if not section:
+        return []
+    results = []
+    seen = set()
+    for slug, label in re.findall(
+        rf"<a\b[^>]*href=[\"'](?:https?://{FILMPALAST_HOST_PATTERN}/|/)?search/genre/([^\"'?#]+)[\"'][^>]*>(.*?)</a>",
+        section.group(1),
+        re.IGNORECASE | re.DOTALL,
+    ):
+        slug = unquote(html_module.unescape(slug)).rstrip("/")
+        name = html_module.unescape(re.sub(r"<[^>]+>", "", label)).strip()
+        if slug and name and slug not in seen:
+            seen.add(slug)
+            results.append({"name": name, "slug": slug})
+    return results
+
+
+def query_filmpalast(keyword="", *, genre=None, limit=None):
+    """Search by title, or fetch the first result page for a genre slug.
+
+    Use fetch_filmpalast_genres() to discover the site's current genres.
+    """
+    validate_limit(limit)
+    if limit == 0:
+        return []
     base = "https://filmpalast.to"
+    if genre and keyword:
+        raise ValueError("Use either a keyword or a genre, not both.")
 
     def _run(term):
-        url = f"{base}/search/title/{quote(term)}"
+        kind = "genre" if genre else "title"
+        url = f"{base}/search/{kind}/{quote(term, safe='')}"
         try:
             resp = GLOBAL_SESSION.get(
                 url,
@@ -890,6 +1089,8 @@ def query_filmpalast(keyword):
             )
             resp.raise_for_status()
         except Exception as exc:
+            if genre:
+                raise
             logger.debug(f"filmpalast search failed for {term!r}: {exc}")
             return []
 
@@ -945,36 +1146,245 @@ def query_filmpalast(keyword):
                     "poster_url": poster,
                 }
             )
-        return results[:30]
+        return limit_results(results if genre else results[:30], limit)
 
-    results = _run(keyword)
-    if not results:
+    results = _run(genre or keyword)
+    if not results and not genre:
         cleaned = _clean_search_query(keyword)
         if cleaned.lower() != keyword.lower():
             results = _run(cleaned)
     return results
 
 
-def query_kinox(keyword):
-    """Search kinox.to and return a list of results with posters."""
+def fetch_filmo_genres():
+    """Fetch Filmo's current genre IDs and names from the browse filters.
+
+    The slugs are the numeric IDs query_filmo() takes as genre_id.
+    """
+    base = "https://filmo.to"
+    response = GLOBAL_SESSION.get(
+        f"{base}/movies",
+        headers={"Accept-Encoding": "gzip, deflate", "Referer": f"{base}/"},
+        timeout=15,
+    )
+    response.raise_for_status()
+    options = re.search(
+        r'<select\b[^>]*\bname=["\']genre_id["\'][^>]*>(.*?)</select>',
+        response.text,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if not options:
+        return []
+    # The "Any" option carries an empty value and is left out by the \d+ match.
+    return _unique_genres(
+        re.findall(
+            r'<option\b[^>]*\bvalue=["\'](\d+)["\'][^>]*>(.*?)</option>',
+            options.group(1),
+            re.IGNORECASE | re.DOTALL,
+        )
+    )
+
+
+def query_filmo(
+    keyword="",
+    *,
+    genre_id=None,
+    year=None,
+    runtime_min=None,
+    runtime_max=None,
+    country=None,
+    sort=None,
+    limit=None,
+):
+    """Search by keyword, or browse movies with optional site filters.
+
+    Browsing follows all result pages. genre_id uses Filmo's numeric IDs,
+    runtime bounds are minutes, and country uses a two-letter country code.
+    Omit filters or pass None / "" to use the site's defaults.
+    """
+    validate_limit(limit)
+    if limit == 0:
+        return []
+    base = "https://filmo.to"
+    filters = optional_filters(
+        genre_id=genre_id,
+        year=year,
+        runtime_min=runtime_min,
+        runtime_max=runtime_max,
+        country=country,
+        sort=sort,
+    )
+    if keyword and filters:
+        raise ValueError("Use either a keyword or Filmo browse filters, not both.")
+    url = f"{base}/search?q={quote_plus(keyword)}" if keyword else f"{base}/movies"
+    params = filters if not keyword else None
+    results = []
+    seen = set()
+    visited = set()
+    while url not in visited:
+        visited.add(url)
+        try:
+            resp = GLOBAL_SESSION.get(
+                url,
+                params=params,
+                headers={"Accept-Encoding": "gzip, deflate", "Referer": f"{base}/"},
+                timeout=15,
+            )
+            resp.raise_for_status()
+        except Exception as exc:
+            if not keyword:
+                raise
+            logger.debug(f"filmo search failed for {keyword!r}: {exc}")
+            return []
+        previous_count = len(results)
+        for result in _parse_filmo_cards(resp.text, base):
+            if result["url"] not in seen:
+                seen.add(result["url"])
+                results.append(result)
+        if keyword:
+            return limit_results(results[:30], limit)
+        next_link = re.search(
+            r"<a\b(?=[^>]*\brel=[\"']next[\"'])[^>]*\bhref=[\"']([^\"']+)",
+            resp.text,
+            re.IGNORECASE,
+        )
+        if limit_reached(results, limit):
+            break
+        if len(results) == previous_count or not next_link:
+            break
+        url = urljoin(url, html_module.unescape(next_link.group(1)))
+        params = None
+    return limit_results(results, limit)
+
+
+def _parse_filmo_cards(page, base):
+    results = []
+    seen = set()
+    card_pattern = re.compile(
+        r'<a\b[^>]*href=["\']([^"\']*/movies/[\w-]+)["\'][^>]*>(.*?)</a>',
+        re.IGNORECASE | re.DOTALL,
+    )
+    for match in card_pattern.finditer(page):
+        movie_url, card = match.groups()
+        movie_url = urljoin(base, movie_url)
+        if movie_url in seen:
+            continue
+
+        title_match = re.search(
+            r'class=["\'][^"\']*(?:popular-spotlight-card__title|movie-poster-grid-card__title)[^"\']*["\'][^>]*>(.*?)</',
+            card,
+            re.IGNORECASE | re.DOTALL,
+        )
+        if not title_match:
+            continue
+        title = html_module.unescape(
+            re.sub(r"<[^>]+>", "", title_match.group(1))
+        ).strip()
+        if not title:
+            continue
+
+        poster = ""
+        image_match = re.search(r'<img\b[^>]*\bsrc=["\']([^"\']+)', card, re.IGNORECASE)
+        if image_match:
+            poster = urljoin(base, html_module.unescape(image_match.group(1)))
+
+        seen.add(movie_url)
+        results.append({"title": title, "url": movie_url, "poster_url": poster})
+
+    return results
+
+
+def fetch_kinox_genres():
+    """Fetch current genre slugs and names from Kinox's genre menu."""
     from .models.kinox.series import KINOX_DOMAIN
 
     base = f"https://{KINOX_DOMAIN}"
-    url = f"{base}/Search.html?q={quote_plus(keyword)}"
+    response = GLOBAL_SESSION.get(
+        f"{base}/",
+        headers={
+            "User-Agent": DEFAULT_USER_AGENT,
+            "Accept-Encoding": "gzip, deflate",
+        },
+        timeout=15,
+    )
+    response.raise_for_status()
+    return _unique_genres(
+        # Each entry ends in a span with its title count, and a few carry
+        # nothing else, so those fall back to the slug as their name.
+        (slug, re.sub(r"<span\b.*?</span>", "", label, flags=re.DOTALL))
+        for slug, label in re.findall(
+            r'<a\b[^>]*href=["\'][^"\']*?/Genre/([^"\'/?#]+)["\'][^>]*>(.*?)</a>',
+            response.text,
+            re.IGNORECASE | re.DOTALL,
+        )
+    )
+
+
+def query_kinox(keyword="", *, genre=None, limit=None):
+    """Search Kinox by keyword, or fetch a genre's Top 100 in site order."""
+    validate_limit(limit)
+    if limit == 0:
+        return []
+    from .models.kinox.series import KINOX_DOMAIN
+
+    base = f"https://{KINOX_DOMAIN}"
+    if genre and keyword:
+        raise ValueError("Use either a keyword or a genre, not both.")
+    url = (
+        f"{base}/Genre/{quote(genre, safe='')}/Popular"
+        if genre
+        else f"{base}/Search.html?q={quote_plus(keyword)}"
+    )
+    headers = {
+        "User-Agent": DEFAULT_USER_AGENT,
+        "Accept-Encoding": "gzip, deflate",
+        "Referer": f"{base}/",
+    }
     try:
         resp = GLOBAL_SESSION.get(
             url,
-            headers={"Accept-Encoding": "gzip, deflate", "Referer": f"{base}/"},
+            headers=headers,
             timeout=15,
         )
         resp.raise_for_status()
     except Exception as exc:
+        if genre:
+            raise
         logger.debug(f"kinox search failed for {keyword!r}: {exc}")
         return []
 
+    page = resp.text
+    if genre:
+        params_match = re.search(
+            r"<input\b(?=[^>]*\bid=[\"']ListParams[\"'])[^>]*\bvalue=[\"']([^\"']*)",
+            page,
+            re.IGNORECASE,
+        )
+        if params_match:
+            # Genre pages load their cards via AJAX; no browser cookies are needed.
+            params = json.loads(html_module.unescape(params_match.group(1)))
+            params["Length"] = min(limit, 100) if limit is not None else 100
+            resp = GLOBAL_SESSION.post(
+                f"{base}/aGET/List/",
+                data={
+                    "Page": 1,
+                    "Per_Page": params["Length"],
+                    "ListMode": "cover",
+                    "additional": json.dumps(params),
+                    "iDisplayStart": 0,
+                    "iDisplayLength": params["Length"],
+                },
+                headers={**headers, "Referer": url},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            page = resp.json().get("Content")
+            if not isinstance(page, str):
+                raise RuntimeError("Kinox did not return a movie list.")
+
     results = []
     seen = set()
-    for block in resp.text.split('class="Opt leftOpt Headlne"')[1:]:
+    for block in page.split('class="Opt leftOpt Headlne"')[1:]:
         href = re.search(r'href="([^"]+)"', block, re.IGNORECASE)
         title_m = re.search(r'title="([^"]+)"', block, re.IGNORECASE) or re.search(
             r"<h1>(.*?)</h1>", block, re.DOTALL | re.IGNORECASE
@@ -1009,14 +1419,60 @@ def query_kinox(keyword):
                 "poster_url": poster,
             }
         )
-    return results[:30]
+    if genre and not results:
+        for cell in re.findall(
+            r'<td\b[^>]*class=["\'][^"\']*\bTitle\b[^"\']*["\'][^>]*>(.*?)</td>',
+            page,
+            re.IGNORECASE | re.DOTALL,
+        ):
+            match = re.search(
+                r'<a\b[^>]*href=["\']([^"\']*/Stream/[^"\']+)["\'][^>]*>(.*?)</a>',
+                cell,
+                re.IGNORECASE | re.DOTALL,
+            )
+            if not match:
+                continue
+            url = urljoin(base, html_module.unescape(match.group(1)))
+            title = html_module.unescape(re.sub(r"<[^>]+>", "", match.group(2))).strip()
+            if title and url not in seen:
+                seen.add(url)
+                results.append({"title": title, "url": url, "poster_url": ""})
+    return limit_results(results[:100] if genre else results[:30], limit)
 
 
 _bs_index_cache = None
 
 
-def query_burningseries(keyword):
-    """Search burning-series by scanning its full series index (cached)."""
+def fetch_burningseries_genres():
+    """Genre names off the BurningSeries index, in the site's own order.
+
+    query_burningseries() takes these names as its genre, and the index they
+    come from is the same one it searches, fetched once per process.
+    """
+    global _bs_index_cache
+    if _bs_index_cache is None:
+        from .models.burningseries.series import bs_get_with_fallback
+
+        _bs_index_cache = bs_get_with_fallback("/andere-serien")
+    return _unique_genres(
+        (name, name)
+        for name in re.findall(
+            r'<div\s+class=["\']genre["\']>\s*<span>\s*<strong>(.*?)</strong>',
+            _bs_index_cache,
+            re.IGNORECASE | re.DOTALL,
+        )
+    )
+
+
+def query_burningseries(keyword="", *, genre=None, limit=None):
+    """Search the cached BurningSeries index, optionally within a genre name.
+
+    Genre names are case-insensitive and can be combined with a keyword.
+    Genre searches return all matches; plain keyword searches return up to 30.
+    """
+    validate_limit(limit)
+    if limit == 0:
+        return []
     from .models.burningseries.series import bs_current_base, bs_get_with_fallback
 
     global _bs_index_cache
@@ -1024,8 +1480,27 @@ def query_burningseries(keyword):
         try:
             _bs_index_cache = bs_get_with_fallback("/andere-serien")
         except Exception as exc:
+            if genre:
+                raise
             logger.debug(f"burning-series index fetch failed: {exc}")
             return []
+
+    index = _bs_index_cache
+    if genre:
+        for name, entries in re.findall(
+            r'<div\s+class=["\']genre["\']>\s*<span>\s*<strong>(.*?)</strong>'
+            r"\s*</span>\s*<ul>(.*?)</ul>",
+            index,
+            re.IGNORECASE | re.DOTALL,
+        ):
+            if (
+                html_module.unescape(name).strip().casefold()
+                == genre.strip().casefold()
+            ):
+                index = entries
+                break
+        else:
+            raise ValueError(f"BurningSeries genre not available: {genre}")
 
     base = bs_current_base()
     keyword_lower = keyword.lower()
@@ -1033,7 +1508,7 @@ def query_burningseries(keyword):
     seen = set()
     for m in re.finditer(
         r'<a[^>]*href=["\']/?(serie/([^"\'/]+))["\'][^>]*>(.*?)</a>',
-        _bs_index_cache,
+        index,
         re.IGNORECASE | re.DOTALL,
     ):
         slug = m.group(2)
@@ -1047,69 +1522,7 @@ def query_burningseries(keyword):
             )
 
     results.sort(key=lambda item: _relevance_score(item["title"], keyword))
-    return results[:30]
-
-
-def _cineby_result(item):
-    """Turn a TMDB search/list item into a browse/search result dict."""
-    from .models.cineby.series import (
-        TMDB_IMG,
-        cineby_movie_url,
-        cineby_tv_url,
-    )
-
-    media = item.get("media_type")
-    tmdb_id = item.get("id")
-    if not tmdb_id:
-        return None
-    if media == "tv" or (media is None and item.get("name")):
-        url = cineby_tv_url(tmdb_id)
-        title = item.get("name") or item.get("title")
-        year = (item.get("first_air_date") or "")[:4]
-    else:
-        url = cineby_movie_url(tmdb_id)
-        title = item.get("title") or item.get("name")
-        year = (item.get("release_date") or "")[:4]
-    if not title:
-        return None
-    if year:
-        title = f"{title} ({year})"
-    poster = item.get("poster_path")
-    return {
-        "title": title,
-        "url": url,
-        "poster_url": f"{TMDB_IMG}{poster}" if poster else "",
-        "genre": "",
-    }
-
-
-def query_cineby(keyword):
-    """Search cineby via its TMDB proxy (movies + TV)."""
-    from .models.cineby.series import tmdb_get
-
-    data = tmdb_get(f"/search/multi?query={quote_plus(keyword)}&page=1")
-    results = []
-    for item in data.get("results", []):
-        if item.get("media_type") == "person":
-            continue
-        r = _cineby_result(item)
-        if r:
-            results.append(r)
-    return results[:30]
-
-
-def fetch_cineby_movies():
-    """Trending movies on cineby for the browse grid."""
-    from .models.cineby.series import tmdb_get
-
-    data = tmdb_get("/trending/movie/week")
-    results = []
-    for item in data.get("results", []):
-        item.setdefault("media_type", "movie")
-        r = _cineby_result(item)
-        if r:
-            results.append(r)
-    return results[:30]
+    return limit_results(results if genre else results[:30], limit)
 
 
 def fetch_filmpalast_movies():
@@ -1175,6 +1588,16 @@ def fetch_filmpalast_movies():
             }
         )
     return results[:30]
+
+
+def fetch_filmo_movies():
+    """Fetch the newest movies from filmo.to for the browse grid."""
+    try:
+        results = query_filmo(limit=30)
+    except Exception as exc:
+        logger.debug(f"filmo browse failed: {exc}")
+        return None
+    return [{**result, "genre": ""} for result in results]
 
 
 def fetch_kinox_movies():
@@ -1402,6 +1825,147 @@ def search(is_aniworld=None):
             return f"{base_url}{selected_item['link']}"
 
         return curses.wrapper(menu_wrapper)
+
+
+def _moflix_json(endpoint):
+    from .models.moflix_stream.http import BASE_URL, get_response
+
+    page = get_response(BASE_URL + "/")
+    page.raise_for_status()
+    csrf_match = re.search(r'"csrf_token"\s*:\s*"([^"]+)"', page.text)
+    csrf = csrf_match.group(1) if csrf_match else None
+    response = get_response(BASE_URL + endpoint, page.cookies, csrf)
+    response.raise_for_status()
+    return response.json()
+
+
+def fetch_moflix_movies():
+    data = _moflix_json("/api/v1/titles?perPage=24&orderBy=createdAt&orderDir=desc")
+    results = []
+    for item in data.get("pagination", {}).get("data", []):
+        url = f"https://moflix-stream.xyz/titles/{item.get('id')}"
+        title = item.get("name") or "Unknown"
+        poster = item.get("poster") or ""
+        if poster and not poster.startswith("http"):
+            poster = "https://moflix-stream.xyz/" + poster.lstrip("/")
+        results.append({"title": title, "url": url, "poster_url": poster})
+    return results
+
+
+def query_moflix(keyword):
+    data = _moflix_json(f"/api/v1/search/{quote(keyword)}")
+    results = []
+    for item in data.get("results", []):
+        # The search API also returns people. Their IDs cannot be opened
+        # through /titles/ and would produce a 404 in the detail view.
+        if not isinstance(item, dict) or item.get("model_type") != "title":
+            continue
+        title_id = item.get("id")
+        if not str(title_id).isdigit():
+            continue
+        url = f"https://moflix-stream.xyz/titles/{title_id}"
+        title = item.get("name") or "Unknown"
+        poster = item.get("poster") or ""
+        if poster and not poster.startswith("http"):
+            poster = "https://moflix-stream.xyz/" + poster.lstrip("/")
+        results.append({"title": title, "url": url, "poster_url": poster})
+    return results
+
+
+def _query_nhplayer_site(base, keyword, limit, animeid=False):
+    from .models.hentai_tv.http import get_response
+
+    validate_limit(limit)
+    if limit == 0 or not keyword.strip():
+        return []
+    response = get_response(
+        base + "/api/search", params={"q": keyword.strip(), "limit": limit or 1000}
+    )
+    results = []
+    seen = set()
+    for item in response.json().get("videos", []):
+        slug = item.get("slug")
+        if not slug or slug in seen:
+            continue
+        seen.add(slug)
+        path = f"/{item['wpId']}/{slug}" if animeid and item.get("wpId") else f"/{slug}"
+        if not animeid:
+            path = f"/hentai/{slug}"
+        url = base + path
+        results.append(
+            {
+                "title": f"{item.get('title') or slug} Episode {item.get('ep', 1)}",
+                "url": url,
+                "link": url,
+                "poster": urljoin(base, item["cover"]) if item.get("cover") else "",
+            }
+        )
+    return limit_results(results, limit)
+
+
+def query_hentai_tv(keyword, *, limit=30):
+    """Search hentai.tv episodes; result URLs can be passed directly to the CLI."""
+    return _query_nhplayer_site("https://hentai.tv", keyword, limit)
+
+
+def query_animeidhentai(keyword, *, limit=30):
+    """Search AnimeID episodes, including the legacy numeric-ID URL form."""
+    return _query_nhplayer_site(
+        "https://animeidhentai.com", keyword, limit, animeid=True
+    )
+
+
+def query_hentaihaven(keyword, *, limit=30):
+    """Search HentaiHaven titles, excluding unrelated catalogue results."""
+    from .models.hentai_tv.http import get_response
+
+    validate_limit(limit)
+    if limit == 0 or not keyword.strip():
+        return []
+    base = "https://hentaihaven.xxx"
+    results = []
+    seen = set()
+    for page in range(1, MAX_PAGES + 1):
+        payload = get_response(
+            base + "/api/manga/",
+            params={
+                "search": keyword.strip(),
+                "live": "1",
+                "locale": "en",
+                "per_page": 24,
+                "page": page,
+                "orderby": "date",
+                "order": "desc",
+            },
+        ).json()
+        items = payload.get("data", [])
+        fresh = False
+        for item in items:
+            slug = item.get("slug")
+            if not slug or slug in seen:
+                continue
+            fresh = True
+            seen.add(slug)
+            title = html_module.unescape(item.get("title", {}).get("rendered", slug))
+            if not all(word in title.casefold() for word in keyword.casefold().split()):
+                continue
+            url = f"{base}/watch/{slug}/"
+            poster = item.get("meta", {}).get("vraven_remote_thumbnail", "")
+            results.append(
+                {
+                    "title": title,
+                    "url": url,
+                    "link": url,
+                    "poster": urljoin("https://img.hentaihaven.xxx/", poster)
+                    if poster
+                    else "",
+                }
+            )
+            if limit_reached(results, limit):
+                return results
+        if not fresh or page >= payload.get("totalPages", 1):
+            break
+    return results
 
 
 if __name__ == "__main__":

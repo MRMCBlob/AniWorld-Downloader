@@ -145,9 +145,7 @@ class SonarrClient(ServarrClient):
         Their relative directories are the most reliable source for custom or
         translated season-folder names when the sync chooses a direct target.
         """
-        result = self.get(
-            self.api("/episodefile"), params={"seriesId": int(series_id)}
-        )
+        result = self.get(self.api("/episodefile"), params={"seriesId": int(series_id)})
         return result if isinstance(result, list) else []
 
     def naming_config(self):

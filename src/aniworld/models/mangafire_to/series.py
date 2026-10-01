@@ -1,16 +1,25 @@
 import re
 import shutil
+import tempfile
 import zipfile
+import zlib
 from os import getenv
 from pathlib import Path
 from pprint import pprint
-from urllib.parse import quote, urlparse
+from urllib.parse import urlencode, urlparse
 
+from ...common.search import (
+    limit_reached,
+    limit_results,
+    optional_filters,
+    validate_limit,
+)
 from ...config import GLOBAL_SESSION
 from ...playwright.captcha import is_captcha_page, solve_captcha
 from .vrf import sign_url
 
-SEARCH_API = "https://mangafire.to/api/titles?keyword={}&limit=20"
+SEARCH_API = "https://mangafire.to/api/titles"
+FILTER_OPTIONS_API = "https://mangafire.to/api/filter-options"
 CHAPTERS_API = "https://mangafire.to/api/titles/{}/chapters?language=en&sort=number&order=asc&page={}&limit=200"
 CHAPTER_URL = "https://mangafire.to/title/{}/chapter/{}"
 CHAPTER_API = "https://mangafire.to/api/chapters/{}"
@@ -63,14 +72,50 @@ def _get_download_root() -> Path:
     return Path.home() / path
 
 
+def _valid_image(data: bytes) -> bool:
+    """Reject unknown image data and common corruption without a decoder."""
+    if data.startswith(b"\xff\xd8\xff"):
+        return b"\xff\xda" in data and data.endswith(b"\xff\xd9")
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        offset = 8
+        has_pixels = False
+        while offset + 12 <= len(data):
+            size = int.from_bytes(data[offset : offset + 4], "big")
+            end = offset + 8 + size
+            if end + 4 > len(data):
+                return False
+            chunk = data[offset + 4 : end]
+            if zlib.crc32(chunk) != int.from_bytes(data[end : end + 4], "big"):
+                return False
+            has_pixels |= chunk[:4] == b"IDAT" and size > 0
+            if chunk[:4] == b"IEND":
+                return has_pixels and size == 0 and end + 4 == len(data)
+            offset = end + 4
+        return False
+    if data.startswith(b"RIFF"):
+        return (
+            len(data) >= 20
+            and data[8:12] == b"WEBP"
+            and data[12:16] in (b"VP8 ", b"VP8L", b"VP8X")
+            and int.from_bytes(data[4:8], "little") + 8 == len(data)
+        )
+    if data.startswith((b"GIF87a", b"GIF89a")):
+        return len(data) > 13 and data.endswith(b";")
+    return False
+
+
 def _download_file(url: str, file_path: Path) -> Path:
-    """Download a file to disk."""
+    """Validate an image before atomically replacing its destination."""
     file_path.parent.mkdir(parents=True, exist_ok=True)
 
     response = _get(url)
-
-    with file_path.open("wb") as file:
-        file.write(response.content)
+    data = response.content
+    if not _valid_image(data):
+        raise ValueError(f"Invalid or incomplete MangaFire image: {url}")
+    with tempfile.TemporaryDirectory(prefix=".mangafire-", dir=file_path.parent) as tmp:
+        temporary = Path(tmp) / file_path.name
+        temporary.write_bytes(data)
+        temporary.replace(file_path)
 
     return file_path
 
@@ -177,7 +222,7 @@ class MangaFireToPage:
             else f"{self.page_number:03}"
         )
 
-        if file_path.exists():
+        if file_path.exists() and _valid_image(file_path.read_bytes()):
             print(f"[SKIP] {progress} {file_path}")
             return file_path
 
@@ -422,7 +467,7 @@ class MangaFireToChapter:
         else:
             folder = Path(folder)
 
-        cbz_path = folder.with_suffix(".cbz")
+        cbz_path = folder.with_name(folder.name + ".cbz")
 
         chapter_progress = (
             f"{chapter_index:03}/{total_chapters:03}"
@@ -436,6 +481,8 @@ class MangaFireToChapter:
             pages = [page for page in pages if page.page_number in selected]
 
         total_pages = len(pages)
+        if not pages:
+            raise ValueError("No MangaFire pages selected for download")
 
         if self.mangafire_format != "cbz":
             folder.mkdir(parents=True, exist_ok=True)
@@ -448,8 +495,13 @@ class MangaFireToChapter:
         if cbz_path.exists():
             try:
                 with zipfile.ZipFile(cbz_path, "r") as zf:
-                    existing_files = set(zf.namelist())
-            except zipfile.BadZipFile:
+                    for name in set(zf.namelist()):
+                        try:
+                            if _valid_image(zf.read(name)):
+                                existing_files.add(name)
+                        except (zipfile.BadZipFile, zlib.error, EOFError):
+                            continue
+            except (zipfile.BadZipFile, zlib.error, EOFError):
                 pass
 
         pages_to_download = [p for p in pages if p.file_name not in existing_files]
@@ -467,11 +519,21 @@ class MangaFireToChapter:
             page.download(folder, total_pages=total_pages)
 
         print(f"[ZIP] Updating {cbz_path.name}...")
-        with zipfile.ZipFile(cbz_path, "a", zipfile.ZIP_DEFLATED) as zf:
-            for page in pages_to_download:
-                file_path = folder / page.file_name
-                if file_path.exists():
-                    zf.write(file_path, arcname=page.file_name)
+        with tempfile.TemporaryDirectory(
+            prefix=".mangafire-", dir=folder.parent
+        ) as tmp:
+            temporary = Path(tmp) / cbz_path.name
+            with zipfile.ZipFile(temporary, "w", zipfile.ZIP_DEFLATED) as zf:
+                if existing_files:
+                    with zipfile.ZipFile(cbz_path, "r") as existing:
+                        for name in sorted(existing_files):
+                            zf.writestr(name, existing.read(name))
+                for page in pages_to_download:
+                    zf.write(folder / page.file_name, arcname=page.file_name)
+            with zipfile.ZipFile(temporary, "r") as zf:
+                if zf.testzip() is not None:
+                    raise ValueError("MangaFire archive verification failed")
+            temporary.replace(cbz_path)
 
         shutil.rmtree(folder, ignore_errors=True)
 
@@ -732,11 +794,62 @@ class MangaFireToSeries:
 # -----------------------------
 
 
-def search_series(query: str) -> list:
-    """Search MangaFire series."""
-    response = _get(SEARCH_API.format(quote(query)))
-    response_data = response.json()
-    return response_data.get("items", [])
+def fetch_mangafire_genres() -> list:
+    """Fetch the current genre IDs and names from MangaFire's filter options."""
+    return _get(FILTER_OPTIONS_API, timeout=15).json()["data"]["genres"]
+
+
+def search_series(query: str = "", *, genre=None, sort=None, limit=20) -> list:
+    """Search titles, optionally filtered by a runtime genre name or ID.
+
+    sort uses the site's field:direction notation (e.g. score:desc).
+    limit=None follows all pages; limit=0 makes no requests.
+    """
+    validate_limit(limit)
+    if limit == 0:
+        return []
+    params = optional_filters(keyword=query)
+    if genre is not None and genre != "":
+        genres = fetch_mangafire_genres()
+        selected = next(
+            (
+                item
+                for item in genres
+                if str(item["id"]) == str(genre)
+                or item["name"].casefold() == str(genre).strip().casefold()
+            ),
+            None,
+        )
+        if selected is None:
+            raise ValueError(f"MangaFire genre not available: {genre}")
+        params["genres_in[]"] = selected["id"]
+    if sort:
+        field, separator, direction = sort.partition(":")
+        if not separator or not field or direction not in ("asc", "desc"):
+            raise ValueError("sort must use field:asc or field:desc.")
+        params[f"order[{field}]"] = direction
+
+    params["limit"] = min(limit, 20) if limit is not None else 20
+    results = []
+    seen = set()
+    page = 1
+    while True:
+        params["page"] = page
+        response = _get(f"{SEARCH_API}?{urlencode(params)}", timeout=15).json()
+        previous_count = len(results)
+        for item in response.get("items", []):
+            key = item.get("id")
+            if key is None:
+                key = item.get("hid") or item["url"]
+            if key not in seen:
+                seen.add(key)
+                results.append(item)
+        if limit_reached(results, limit) or len(results) == previous_count:
+            break
+        if not response.get("meta", {}).get("hasNext"):
+            break
+        page += 1
+    return limit_results(results, limit)
 
 
 # -----------------------------

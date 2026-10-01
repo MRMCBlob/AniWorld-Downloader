@@ -80,6 +80,14 @@ VIDEO_CODEC_MAP = {
     "h264": "libx264",
     "h265": "libx265",
     "av1": "libsvtav1",
+    "h264_nvenc": "h264_nvenc",
+    "hevc_nvenc": "hevc_nvenc",
+    "h264_amf": "h264_amf",
+    "hevc_amf": "hevc_amf",
+    "av1_amf": "av1_amf",
+    "h264_qsv": "h264_qsv",
+    "hevc_qsv": "hevc_qsv",
+    "av1_qsv": "av1_qsv",
 }
 
 ACTION_METHODS = {
@@ -133,10 +141,6 @@ def _get_random_user_agent() -> str:
 
 DEFAULT_USER_AGENT = _get_random_user_agent()
 
-LULUVDO_USER_AGENT = (
-    "Mozilla/5.0 (Android 15; Mobile; rv:132.0) Gecko/132.0 Firefox/132.0"
-)
-
 # TODO:
 # This is so fucking annoying because using GLOBAL_SESSION anywhere in the
 # codebase ends up importing basically every module, so even a simple fetch
@@ -178,9 +182,9 @@ SUPPORTED_PROVIDERS = (
     "Vidoza",
     "Doodstream",
     "Filemoon",
-    # "LoadX",
-    # "Luluvdo",
-    # "Streamtape",
+    "Gupload",
+    "MoflixClick",
+    "Vidara",
 )
 
 
@@ -268,15 +272,13 @@ PROVIDER_HEADERS_D = {
         "Referer": "https://voe.sx/",
         "Origin": "https://voe.sx",
     },
-    "LoadX": {"Accept": "*/*"},
-    "Cineby": {"Referer": "https://www.cineby.at/"},
     "Filemoon": {"User-Agent": DEFAULT_USER_AGENT, "Referer": "https://filemoon.to"},
-    "Luluvdo": {
-        "User-Agent": LULUVDO_USER_AGENT,
-        "Accept-Language": "de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Origin": "https://luluvdo.com",
-        "Referer": "https://luluvdo.com/",
+    "Gupload": {"Referer": "https://gupload.xyz/", "Accept-Encoding": "identity"},
+    "MoflixClick": {
+        "Referer": "https://moflix-stream.click/",
+        "Accept-Encoding": "identity",
     },
+    "Vidara": {"Referer": "https://vidara.to/"},
 }
 
 PROVIDER_HEADERS_W = {
@@ -296,15 +298,13 @@ PROVIDER_HEADERS_W = {
         "Referer": "https://voe.sx/",
         "Origin": "https://voe.sx",
     },
-    "LoadX": {"Accept": "*/*"},
-    "Cineby": {"Referer": "https://www.cineby.at/"},
     "Filemoon": {"User-Agent": DEFAULT_USER_AGENT, "Referer": "https://filemoon.to"},
-    "Luluvdo": {
-        "User-Agent": LULUVDO_USER_AGENT,
-        "Accept-Language": "de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Origin": "https://luluvdo.com",
-        "Referer": "https://luluvdo.com/",
+    "Gupload": {"Referer": "https://gupload.xyz/", "Accept-Encoding": "identity"},
+    "MoflixClick": {
+        "Referer": "https://moflix-stream.click/",
+        "Accept-Encoding": "identity",
     },
+    "Vidara": {"Referer": "https://vidara.to/"},
 }
 
 
@@ -412,6 +412,28 @@ HANIME_TV_SERIES_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+HENTAI_TV_EPISODE_PATTERN = re.compile(
+    r"^https?://(?:www\.)?hentai\.tv/hentai/[A-Za-z0-9-]+/?$",
+    re.IGNORECASE,
+)
+
+ANIME_ID_HENTAI_EPISODE_PATTERN = re.compile(
+    r"^https?://(?:www\.)?animeidhentai\.com/"
+    r"(?:\d+/[A-Za-z0-9-]+|"
+    r"[A-Za-z0-9-]+(?:-episode-\d+|-sub-eng|-raw)[A-Za-z0-9-]*)/?$",
+    re.IGNORECASE,
+)
+
+HENTAI_HAVEN_SERIES_PATTERN = re.compile(
+    r"^https?://(?:www\.)?hentaihaven\.xxx/(?:[a-z]{2}/)?watch/[A-Za-z0-9-]+/?$",
+    re.IGNORECASE,
+)
+HENTAI_HAVEN_EPISODE_PATTERN = re.compile(
+    r"^https?://(?:www\.)?hentaihaven\.xxx/(?:[a-z]{2}/)?watch/"
+    r"[A-Za-z0-9-]+/episode-\d+/?$",
+    re.IGNORECASE,
+)
+
 # serienstream.to went down at times; serienstream.cx and 186.2.175.5 are mirrors.
 
 # Reachable hosts, in preference order. The IP is a last resort and needs a Host
@@ -425,9 +447,13 @@ STO_LEGACY_DOMAINS = ["s.to"]
 
 STO_ALL_HOSTS = [*STO_DOMAINS, STO_IP, *STO_LEGACY_DOMAINS]
 
-_STO_HOST = r"(?:www\.)?(?:" + "|".join(re.escape(h) for h in STO_ALL_HOSTS) + r")"
+STO_HOST_PATTERN = (
+    r"(?:www\.)?(?:" + "|".join(re.escape(h) for h in STO_ALL_HOSTS) + r")"
+)
 
-STO_HOST_RE = re.compile(r"^(https?://)" + _STO_HOST + r"(?=[:/?#]|$)", re.IGNORECASE)
+STO_HOST_RE = re.compile(
+    r"^(https?://)" + STO_HOST_PATTERN + r"(?=[:/?#]|$)", re.IGNORECASE
+)
 
 
 def is_sto_host(url):
@@ -436,11 +462,11 @@ def is_sto_host(url):
 
 
 SERIENSTREAM_SERIES_PATTERN = re.compile(
-    rf"^https?://{_STO_HOST}/serie/[a-zA-Z0-9\-]+/?$", re.IGNORECASE
+    rf"^https?://{STO_HOST_PATTERN}/serie/[a-zA-Z0-9\-]+/?$", re.IGNORECASE
 )
 
 SERIENSTREAM_SEASON_PATTERN = re.compile(
-    rf"^https?://{_STO_HOST}/serie/"
+    rf"^https?://{STO_HOST_PATTERN}/serie/"
     r"[a-zA-Z0-9\-]+/"
     r"staffel-\d+"
     r"/?$",
@@ -448,7 +474,7 @@ SERIENSTREAM_SEASON_PATTERN = re.compile(
 )
 
 SERIENSTREAM_EPISODE_PATTERN = re.compile(
-    rf"^https?://{_STO_HOST}/serie/"
+    rf"^https?://{STO_HOST_PATTERN}/serie/"
     r"[a-zA-Z0-9\-]+/"
     r"staffel-\d+/episode-\d+"
     r"/?$",
@@ -470,8 +496,10 @@ MANGA_FIRE_CHAPTER_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+FILMPALAST_HOST_PATTERN = r"(?:www\.)?filmpalast\.[^/]+"
+
 FILMPALAST_SERIES_PATTERN = re.compile(
-    r"^https?://(?:www\.)?filmpalast\.[^/]+/stream/[^/?#]+/?$",
+    rf"^https?://{FILMPALAST_HOST_PATTERN}/stream/[^/?#]+/?$",
     re.IGNORECASE,
 )
 
@@ -481,36 +509,22 @@ KINOX_SERIES_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-_CINEBY_HOST = r"(?:www\.)?cineby\.(?:at|app|[a-z]{2,4})"
-
-# /movie/<id> or /tv/<id> (optionally ?s=N for a specific TV season)
-CINEBY_SERIES_PATTERN = re.compile(
-    rf"^https?://{_CINEBY_HOST}/(?:movie|tv)/\d+(?:\?[^#]*)?/?$",
-    re.IGNORECASE,
-)
-
-# /movie/<id> or /tv/<id>/<season>/<episode>
-CINEBY_EPISODE_PATTERN = re.compile(
-    rf"^https?://{_CINEBY_HOST}/(?:movie/\d+|tv/\d+/\d+/\d+)(?:\?[^#]*)?/?$",
-    re.IGNORECASE,
-)
-
-_BS_HOST = r"(?:www\.)?(?:burning-series\.(?:io|net)|burningseries\.(?:ac|cx)|bs\.cine\.to|bs\.to)"
+BS_HOST_PATTERN = r"(?:www\.)?(?:burning-series\.(?:io|net)|burningseries\.(?:ac|cx)|bs\.cine\.to|bs\.to)"
 
 BURNINGSERIES_SERIES_PATTERN = re.compile(
-    rf"^https?://{_BS_HOST}/serie/[a-zA-Z0-9\-]+(?:\?[^#]*)?/?$",
+    rf"^https?://{BS_HOST_PATTERN}/serie/[a-zA-Z0-9\-]+(?:\?[^#]*)?/?$",
     re.IGNORECASE,
 )
 
 # /serie/<slug>/<season>[/<lang>]
 BURNINGSERIES_SEASON_PATTERN = re.compile(
-    rf"^https?://{_BS_HOST}/serie/[a-zA-Z0-9\-]+/\d+(?:/[a-z]{{2}})?/?$",
+    rf"^https?://{BS_HOST_PATTERN}/serie/[a-zA-Z0-9\-]+/\d+(?:/[a-z]{{2}})?/?$",
     re.IGNORECASE,
 )
 
 # /serie/<slug>/<season>/<episode-slug>/<lang>
 BURNINGSERIES_EPISODE_PATTERN = re.compile(
-    rf"^https?://{_BS_HOST}/serie/[a-zA-Z0-9\-]+/\d+/[^/]+/[a-z]{{2}}/?$",
+    rf"^https?://{BS_HOST_PATTERN}/serie/[a-zA-Z0-9\-]+/\d+/[^/]+/[a-z]{{2}}/?$",
     re.IGNORECASE,
 )
 
@@ -529,3 +543,9 @@ else:
     MPV_CONFIG_DIR = Path.home() / ".config" / "mpv"
 
 MPV_SCRIPTS_DIR = MPV_CONFIG_DIR / "scripts"
+
+
+MOFLIX_SERIES_PATTERN = re.compile(
+    r"^https?://(?:www\.)?moflix-stream\.xyz/titles/\d+(?:/season/\d+(?:/episodes/\d+)?)?(?:\?[^#]*)?/?$",
+    re.IGNORECASE,
+)

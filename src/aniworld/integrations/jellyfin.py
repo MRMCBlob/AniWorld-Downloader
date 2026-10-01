@@ -90,9 +90,9 @@ class JellyfinClient(HttpClient):
                 location = str(location).rstrip("/")
                 if not location:
                     continue
-                if (
-                    target == location or target.startswith(location + "/")
-                ) and len(location) > best_len:
+                if (target == location or target.startswith(location + "/")) and len(
+                    location
+                ) > best_len:
                     best, best_len = folder, len(location)
         return best
 

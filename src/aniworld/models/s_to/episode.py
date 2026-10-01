@@ -10,7 +10,6 @@ from ...config import (
     build_provider_attempt_order,
     logger,
 )
-from ...extractors import provider_functions
 from ..common import check_downloaded
 from ..common.common import (
     download as episode_download,
@@ -21,7 +20,9 @@ from ..common.common import (
 from ..common.common import (
     watch as episode_watch,
 )
+from ..common.extraction import resolve_stream_url
 from .http import (
+    response_text,
     sto_activate,
     sto_candidate_urls,
     sto_get,
@@ -136,7 +137,7 @@ class SerienstreamEpisode:
         if not self.__is_valid_serienstream_episode_url(url):
             raise ValueError(f"Invalid Serienstream episode URL: {url}")
 
-        self.url = sto_rewrite(url)
+        self.url = url
         self._series = series
         self._season = season
 
@@ -360,6 +361,7 @@ class SerienstreamEpisode:
                 or not parsed_provider.netloc
                 or parsed_provider.netloc == redirect_netloc
             ):
+                self.__provider_url = None
                 raise ValueError(
                     f"Failed to resolve provider URL for {self.selected_provider} "
                     f"from redirect {self.redirect_url}"
@@ -368,16 +370,7 @@ class SerienstreamEpisode:
 
     @property
     def stream_url(self):
-        try:
-            stream_url = provider_functions[
-                f"get_direct_link_from_{self.selected_provider.lower()}"
-            ](self.provider_url)
-        except KeyError:
-            raise ValueError(
-                f"The provider '{self.selected_provider}' is not yet implemented."
-            )
-
-        return stream_url
+        return resolve_stream_url(self)
 
     # TODO: add this into a common base class
     @property
@@ -498,7 +491,7 @@ class SerienstreamEpisode:
             logger.debug(f"fetching ({self.url})...")
             resp = sto_get(self.url)
             self.url = sto_rewrite(self.url)
-            self.__html = resp.text
+            self.__html = response_text(resp, self.url)
         return self.__html
 
     # -----------------------------

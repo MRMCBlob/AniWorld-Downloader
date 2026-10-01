@@ -15,13 +15,12 @@ import re
 import sys
 import unicodedata
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import niquests
 
 from .integrations import SonarrClient, read_secret, unmap_path
-
 
 DEFAULT_ANIWORLD_URL = "http://127.0.0.1:8080"
 DEFAULT_MAPPING_FILE = "/config/sonarr-aniworld-map.json"
@@ -112,15 +111,16 @@ def normalize_sync_sites(value):
     """Return the safe, ordered set of sites the Sonarr matcher may use."""
     values = value if isinstance(value, (list, tuple)) else str(value or "").split(",")
     sites = tuple(
-        dict.fromkeys(str(site).strip().casefold() for site in values if str(site).strip())
+        dict.fromkeys(
+            str(site).strip().casefold() for site in values if str(site).strip()
+        )
     )
     if not sites:
         sites = DEFAULT_SYNC_SITES
     unsupported = [site for site in sites if site not in SUPPORTED_SYNC_SITES]
     if unsupported:
         raise SyncError(
-            "SONARR_SYNC_SITES contains unsupported site(s): "
-            + ", ".join(unsupported)
+            "SONARR_SYNC_SITES contains unsupported site(s): " + ", ".join(unsupported)
         )
     return sites
 
@@ -217,15 +217,15 @@ def parse_airdate(value):
     except ValueError:
         return None
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def missing_episodes(series, episodes, now=None, include_specials=False):
     """Only episodes Sonarr monitors, has not got, and which have aired."""
     if not series.get("monitored", True):
         return []
-    now = now or datetime.now(timezone.utc)
+    now = now or datetime.now(UTC)
     monitored_seasons = {
         int(item.get("seasonNumber")): item.get("monitored", True)
         for item in series.get("seasons") or []
@@ -240,7 +240,9 @@ def missing_episodes(series, episodes, now=None, include_specials=False):
             continue
         if season == 0 and not include_specials:
             continue
-        if not episode.get("monitored", True) or not monitored_seasons.get(season, True):
+        if not episode.get("monitored", True) or not monitored_seasons.get(
+            season, True
+        ):
             continue
         if episode.get("hasFile") or int(episode.get("episodeFileId") or 0) > 0:
             continue
@@ -267,7 +269,9 @@ def render_season_folder(template, season_number):
 
     def replace(match):
         width = len(match.group(1) or "")
-        return str(int(season_number)).zfill(width) if width else str(int(season_number))
+        return (
+            str(int(season_number)).zfill(width) if width else str(int(season_number))
+        )
 
     rendered = _SEASON_TOKEN.sub(replace, template)
     if not rendered or "{" in rendered or "}" in rendered:
@@ -401,18 +405,14 @@ def build_plan(
         if not series_url:
             note(
                 f"SKIP {series.get('title')}: {match_reason}; add "
-                f"\"sonarr:{series_id}\" to the mapping file"
+                f'"sonarr:{series_id}" to the mapping file'
             )
             continue
 
         wanted_seasons = {int(ep["seasonNumber"]) for ep in missing}
         try:
-            available_episodes = _episode_index(
-                downloader, series_url, wanted_seasons
-            )
-            known = known_season_directories(
-                series, sonarr.episode_files(series_id)
-            )
+            available_episodes = _episode_index(downloader, series_url, wanted_seasons)
+            known = known_season_directories(series, sonarr.episode_files(series_id))
         except Exception as exc:
             note(f"SKIP {series.get('title')}: cannot inspect episodes: {exc}")
             continue
@@ -486,9 +486,7 @@ def run_sync(args, sonarr=None, downloader=None, note=print):
         affected_series = 0
         for item in plan:
             episodes = (
-                item["episodes"][:remaining]
-                if args.max_episodes
-                else item["episodes"]
+                item["episodes"][:remaining] if args.max_episodes else item["episodes"]
             )
             if not episodes:
                 break
@@ -560,11 +558,15 @@ def parser():
     )
     result.add_argument(
         "--language",
-        default=os.getenv("SONARR_SYNC_LANGUAGE", os.getenv("ANIWORLD_LANGUAGE", "German Dub")),
+        default=os.getenv(
+            "SONARR_SYNC_LANGUAGE", os.getenv("ANIWORLD_LANGUAGE", "German Dub")
+        ),
     )
     result.add_argument(
         "--provider",
-        default=os.getenv("SONARR_SYNC_PROVIDER", os.getenv("ANIWORLD_PROVIDER", "VOE")),
+        default=os.getenv(
+            "SONARR_SYNC_PROVIDER", os.getenv("ANIWORLD_PROVIDER", "VOE")
+        ),
     )
     result.add_argument(
         "--priority", type=int, default=int(os.getenv("SONARR_SYNC_PRIORITY", "10"))

@@ -42,7 +42,13 @@ def _queue_summary():
     if current:
         current = {
             key: current.get(key)
-            for key in ("id", "title", "current_episode", "total_episodes", "current_url")
+            for key in (
+                "id",
+                "title",
+                "current_episode",
+                "total_episodes",
+                "current_url",
+            )
         }
     return {
         "total": counts.get("all", 0),

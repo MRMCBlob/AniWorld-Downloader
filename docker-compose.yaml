@@ -39,7 +39,7 @@ services:
     #   ANIWORLD_PROVIDER: "VOE"                      # Default streaming provider
     #   ANIWORLD_PROVIDER_FALLBACK_ORDER: "VOE,Vidmoly,Vidoza,Doodstream"  # Tried in order after the selected provider fails
     #   ANIWORLD_NAMING_TEMPLATE: "{title} ({year}) [imdbid-{imdbid}]/Season {season}/{title} S{season}E{episode}.mkv"
-    #   ANIWORLD_VIDEO_CODEC: "copy"                  # Video codec: copy | h264 | h265 | av1
+    #   ANIWORLD_VIDEO_CODEC: "copy"                  # Video codec: copy | h264 | h265 | av1 | h264_nvenc | hevc_nvenc | h264_amf | hevc_amf | av1_amf
     #   ANIWORLD_LANG_SEPARATION: "0"                 # Separate downloads into language subfolders (german-dub/, english-sub/)
     #   ANIWORLD_MOVIE_FOLDER: "1"                    # 1 = wrap a movie in its own "Title (Year)" folder, 0 = save it directly
     #   ANIWORLD_DISABLE_ENGLISH_SUB: "0"             # Block English Sub downloads entirely
@@ -53,10 +53,9 @@ services:
     # --- Features (uncomment the environment block to customise) ---
     #   ANIWORLD_ENABLE_LIBRARY: "1"                  # Library tab: browse and delete downloaded files
     #   ANIWORLD_ENABLE_HTV: "0"                      # Show the Hanime tab (adult content)
-    #   ANIWORLD_ENABLE_ANIWORLD: "1"                 # Every site has a toggle: ANIWORLD | STO | MEGAKINO | CINEBY |
+    #   ANIWORLD_ENABLE_ANIWORLD: "1"                 # Every site has a toggle: ANIWORLD | STO | MEGAKINO |
     #   ANIWORLD_ENABLE_STO: "1"                      # FILMPALAST | MANGAFIRE | HTV | KINOX | BURNINGSERIES.
-    #   ANIWORLD_ENABLE_MEGAKINO: "1"                 # Off means no tab and no rows on the home page.
-    #   ANIWORLD_ENABLE_CINEBY: "1"                   # At least one has to stay on.
+    #   ANIWORLD_ENABLE_MEGAKINO: "1"                 # Off means no tab and no rows. At least one has to stay on.
     #   ANIWORLD_ENABLE_FILMPALAST: "1"
     #   ANIWORLD_ENABLE_MANGAFIRE: "1"
     #   ANIWORLD_ENABLE_AUTOSYNC: "0"                 # Auto-Sync: on a schedule, queue new episodes of series you already have

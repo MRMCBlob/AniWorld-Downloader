@@ -113,6 +113,9 @@ def _session():
     if session is None:
         session = niquests.Session()
         _thread_local.session = session
+    from ...config import GLOBAL_SESSION
+
+    session.cookies.update(GLOBAL_SESSION.cookies)
     return session
 
 
@@ -234,31 +237,6 @@ def _select_audio_rendition(renditions, group_id, preferred_lang):
             return rendition
 
     return candidates[0]
-
-
-def rendition_languages(master_text, base_url=""):
-    """Return the ffmpeg lang codes present as *separate* audio renditions.
-
-    Given an HLS master playlist, report which of the languages this downloader
-    can select (``_LANG_PREFIXES``) appear as their own ``#EXT-X-MEDIA:TYPE=AUDIO``
-    rendition — matched the exact same way ``_select_audio_rendition`` matches
-    them, so "detected as available" and "selectable at download time" never
-    disagree. Used by cineby to decide whether e.g. a German dub exists before
-    offering it.
-    """
-    _, renditions = _parse_master_playlist(master_text, base_url)
-    found = set()
-    for code, prefixes in _LANG_PREFIXES.items():
-        hints = _LANG_NAME_HINTS.get(code, ())
-        for rendition in renditions:
-            language = (rendition.language or "").lower()
-            name = (rendition.name or "").lower()
-            if (language and language.startswith(prefixes)) or any(
-                hint in name for hint in hints
-            ):
-                found.add(code)
-                break
-    return found
 
 
 def _parse_media_playlist(text, base_url):

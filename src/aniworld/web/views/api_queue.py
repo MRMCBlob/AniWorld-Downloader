@@ -173,7 +173,9 @@ def _normalise_direct_targets(episodes):
         target = target.resolve(strict=False)
         if not any(target == root or root in target.parents for root in roots):
             allowed = ", ".join(str(root) for root in roots)
-            raise ValueError(f"direct target_path is outside the allowed roots: {allowed}")
+            raise ValueError(
+                f"direct target_path is outside the allowed roots: {allowed}"
+            )
 
         clean = dict(entry)
         clean["url"] = url

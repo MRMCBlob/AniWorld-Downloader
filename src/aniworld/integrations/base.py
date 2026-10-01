@@ -146,7 +146,9 @@ class HttpClient:
     def __init__(self, base_url, api_key, timeout=None, retries=None):
         self.base_url = (base_url or "").strip().rstrip("/")
         self.api_key = (api_key or "").strip()
-        self.timeout = timeout or env_int("ANIWORLD_INTEGRATION_TIMEOUT", DEFAULT_TIMEOUT)
+        self.timeout = timeout or env_int(
+            "ANIWORLD_INTEGRATION_TIMEOUT", DEFAULT_TIMEOUT
+        )
         self.retries = retries if retries is not None else DEFAULT_RETRIES
         self._session = None
 

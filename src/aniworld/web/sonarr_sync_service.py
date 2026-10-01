@@ -3,7 +3,7 @@
 import json
 import os
 import threading
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 from ..logger import get_logger
@@ -38,7 +38,7 @@ def configured_schedule():
 
 
 def _now():
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _local(moment):
@@ -46,7 +46,7 @@ def _local(moment):
 
 
 def _utc(moment):
-    return moment.astimezone(timezone.utc)
+    return moment.astimezone(UTC)
 
 
 def _parse(value):
@@ -55,7 +55,7 @@ def _parse(value):
     except (TypeError, ValueError):
         return None
     if parsed is not None and parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
+        parsed = parsed.replace(tzinfo=UTC)
     return parsed
 
 
@@ -206,6 +206,4 @@ def ensure_started():
             "Sonarr sync scheduler enabled: %s",
             configured_schedule().expression,
         )
-    threading.Thread(
-        target=_loop, name="aniworld-sonarr-sync", daemon=True
-    ).start()
+    threading.Thread(target=_loop, name="aniworld-sonarr-sync", daemon=True).start()

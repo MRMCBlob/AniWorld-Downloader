@@ -49,7 +49,8 @@ SITE_KEYS = (
     "kinox",
     "burningseries",
     "filmpalast",
-    "cineby",
+    "filmo",
+    "moflix",
 )
 
 SITE_LABELS = {
@@ -61,7 +62,8 @@ SITE_LABELS = {
     "kinox": "Kinox",
     "burningseries": "BurningSeries",
     "filmpalast": "FilmPalast",
-    "cineby": "Cineby",
+    "filmo": "Filmo",
+    "moflix": "Moflix",
 }
 
 # The order the tabs appear in on the home page, which is not the order the
@@ -71,9 +73,10 @@ SITE_ORDER = (
     "sto",
     "burningseries",
     "megakino",
-    "cineby",
+    "moflix",
     "kinox",
     "filmpalast",
+    "filmo",
     "htv",
     "mangafire",
 )

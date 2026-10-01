@@ -74,7 +74,7 @@ def test_every_toggle_round_trips(field, env_key):
 # Sites
 #
 # Every site can be switched off, not just the three that used to have a
-# checkbox. Three of them start off, the rest start on.
+# checkbox. Some sites start off, the rest start on.
 # ---------------------------------------------------------------------------
 def test_every_site_can_be_switched_off():
     from aniworld.web.media import SITE_KEYS
@@ -89,7 +89,7 @@ def test_every_site_can_be_switched_off():
 
 
 def test_which_sites_a_fresh_install_shows():
-    """Adult content and the two sites you cannot use out of the box stay off."""
+    """Sites requiring opt-in stay off."""
     assert settings_store.enabled_sites() == {
         "aniworld": True,
         "sto": True,
@@ -99,14 +99,15 @@ def test_which_sites_a_fresh_install_shows():
         "kinox": False,
         "burningseries": False,
         "filmpalast": True,
-        "cineby": True,
+        "filmo": True,
+        "moflix": True,
     }
 
 
 def test_a_site_reads_back_out_of_the_settings():
-    update_settings({"enable_cineby": False})
+    update_settings({"enable_megakino": False})
     settings = settings_store.read_settings()
-    assert settings["enable_cineby"] is False
+    assert settings["enable_megakino"] is False
     assert settings["enable_aniworld"] is True
 
 

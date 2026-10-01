@@ -13,13 +13,27 @@ failure unknowable from a log file.
 """
 
 import json
+import logging
 import subprocess
+from contextlib import contextmanager
 
 import pytest
 
 from aniworld import autodeps, env
 
 REVISION = "1228"
+
+
+@contextmanager
+def _caplog_captures_aniworld(caplog):
+    """Route the app logger into caplog despite its propagate=False."""
+    logger = logging.getLogger("aniworld")
+    caplog.handler.addFilter(lambda record: True)
+    logger.addHandler(caplog.handler)
+    try:
+        yield
+    finally:
+        logger.removeHandler(caplog.handler)
 
 
 @pytest.fixture(autouse=True)
@@ -151,7 +165,7 @@ def test_a_read_only_browser_directory_is_reported_not_attempted(
         autodeps.os, "access", lambda path, mode: str(path) != str(browsers)
     )
 
-    with caplog.at_level("WARNING"):
+    with _caplog_captures_aniworld(caplog), caplog.at_level("WARNING"):
         autodeps.ensure_patchright_chromium()
 
     assert "not writable" in caplog.text
@@ -171,7 +185,7 @@ def test_a_failed_install_logs_the_drivers_output(
 
     monkeypatch.setattr(subprocess, "run", failed)
 
-    with caplog.at_level("WARNING"):
+    with _caplog_captures_aniworld(caplog), caplog.at_level("WARNING"):
         autodeps.ensure_patchright_chromium()
 
     assert "self signed certificate" in caplog.text

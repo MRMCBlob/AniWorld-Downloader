@@ -71,28 +71,14 @@ def test_umlauts_map_to_transliterated_slugs(genre_list_page):
     assert by_name["Actionkomödie"] == "actionkomoedie"
 
 
-def test_a_homepage_that_cannot_be_fetched_falls_back(monkeypatch):
+def test_a_homepage_that_cannot_be_fetched_has_no_genres(monkeypatch):
     monkeypatch.setattr(search, "_fetch_homepage", lambda: None)
-    genres = search.fetch_genres()
-    assert len(genres) == len(search.GENRE_FALLBACK)
-    assert genres[0]["slug"] == "abenteuer"
+    assert search.fetch_genres() == []
 
 
-def test_a_homepage_without_the_list_falls_back(monkeypatch):
+def test_a_page_without_genres_has_no_static_fallback(monkeypatch):
     monkeypatch.setattr(search, "_fetch_homepage", lambda: "<html>redesigned</html>")
-    assert len(search.fetch_genres()) == len(search.GENRE_FALLBACK)
-
-
-def test_the_fallback_list_is_self_consistent():
-    names = [name for name, _ in search.GENRE_FALLBACK]
-    slugs = [slug for _, slug in search.GENRE_FALLBACK]
-    assert len(set(slugs)) == len(slugs), "no duplicate slugs"
-    assert all(names) and all(slugs)
-
-
-def test_the_fallback_matches_the_live_list(genre_list_page):
-    parsed = [(genre["name"], genre["slug"]) for genre in search.fetch_genres()]
-    assert parsed == list(search.GENRE_FALLBACK)
+    assert search.fetch_genres() == []
 
 
 # ---------------------------------------------------------------------------
@@ -144,7 +130,8 @@ def test_a_failed_fetch_returns_nothing(monkeypatch):
         raise RuntimeError("503")
 
     monkeypatch.setattr(search.GLOBAL_SESSION, "get", explode)
-    assert search.fetch_genre_animes("mecha") is None
+    with pytest.raises(RuntimeError, match="503"):
+        search.fetch_genre_animes("mecha")
 
 
 def test_a_page_without_cards_is_empty_not_an_error(monkeypatch):
@@ -168,3 +155,91 @@ def test_every_card_has_the_fields_the_ui_needs(genre_page):
     for item in search.fetch_genre_animes("mecha")["results"]:
         assert set(item) == {"title", "url", "genre", "poster_url"}
         assert item["title"] and item["url"]
+
+
+# ---------------------------------------------------------------------------
+# The newest episodes feed
+# ---------------------------------------------------------------------------
+OGRE = "https://aniworld.to/anime/stream/the-ogres-bride/staffel-1/episode-11"
+RICH_GIRL = (
+    "https://aniworld.to/anime/stream/rich-girl-caretaker-im-secretly-the-caregiver"
+    "-of-the-most-popular-girl-in-this-rich-kid-school/staffel-1/episode-11"
+)
+ONE_PIECE = "https://aniworld.to/anime/stream/one-piece/staffel-23/episode-23"
+
+# What the series page reports for each of them, which is what the folder on
+# disk was named after. The feed has to agree with this or nothing matches.
+SERIES_PAGE_TITLES = {
+    OGRE: "The Ogre's Bride",
+    RICH_GIRL: (
+        "Rich Girl Caretaker: I'm Secretly the Caregiver of the Most Popular "
+        "Girl in This Rich Kid School"
+    ),
+    ONE_PIECE: "One Piece",
+}
+
+
+@pytest.fixture
+def new_episodes_page(monkeypatch):
+    class Response:
+        text = fixture("aniworld_new_episodes.html")
+
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr(search.GLOBAL_SESSION, "get", lambda *a, **k: Response())
+
+
+def _by_url(episodes):
+    return {episode["url"]: episode for episode in episodes}
+
+
+def test_the_feed_is_parsed(new_episodes_page):
+    episodes = search.fetch_new_episodes()
+    assert len(episodes) == 3
+    assert episodes[0]["url"] == OGRE
+    assert episodes[0]["season"] == 1
+    assert episodes[0]["episode"] == 11
+
+
+def test_titles_are_unescaped_in_the_feed(new_episodes_page):
+    """The site writes an apostrophe as &#039;. Left in, the title stops
+    matching the folder the downloader made for it and Auto-Sync silently
+    skips the series. See issue #296."""
+    episodes = _by_url(search.fetch_new_episodes())
+    for url, expected in SERIES_PAGE_TITLES.items():
+        assert episodes[url]["title"] == expected
+
+
+def test_a_feed_title_finds_the_folder_on_disk(new_episodes_page):
+    """The end of the bug. The folder was named after the series page, which
+    unescapes, so a feed title that does not never matches it."""
+    from aniworld.models.common.common import clean_title
+    from aniworld.web.media import folder_matches_title
+
+    episodes = _by_url(search.fetch_new_episodes())
+    for url, series_page_title in SERIES_PAGE_TITLES.items():
+        folder = f"{clean_title(series_page_title)} (2026)"
+        assert folder_matches_title(folder, episodes[url]["title"]) is True
+
+
+def test_a_series_announced_twice_is_collapsed_with_its_languages_merged(
+    new_episodes_page,
+):
+    """One row per language, but Auto-Sync wants one entry per episode holding
+    every language it came out in."""
+    episodes = _by_url(search.fetch_new_episodes())
+    assert episodes[OGRE]["languages"] == ["japanese-german", "japanese-english"]
+
+
+def test_the_date_is_read_off_the_row(new_episodes_page):
+    episodes = _by_url(search.fetch_new_episodes())
+    assert episodes[OGRE]["date"] == "Sa, 12.09.2026"
+
+
+def test_a_failed_feed_fetch_returns_nothing(monkeypatch):
+    def explode(*args, **kwargs):
+        raise RuntimeError("offline")
+
+    monkeypatch.setattr(search.GLOBAL_SESSION, "get", explode)
+    assert search.fetch_new_episodes() is None

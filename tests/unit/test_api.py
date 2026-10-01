@@ -399,14 +399,11 @@ def test_sonarr_sync_endpoint_supports_a_dry_run(client, monkeypatch):
     assert calls == [{"series_ids": [], "reason": "api", "apply": False}]
 
 
-def test_sonarr_sync_endpoint_rejects_bad_or_overlapping_requests(
-    client, monkeypatch
-):
+def test_sonarr_sync_endpoint_rejects_bad_or_overlapping_requests(client, monkeypatch):
     from aniworld.web import sonarr_sync_service
 
     assert (
-        client.post("/api/sonarr/sync", json={"series_id": "seven"}).status_code
-        == 400
+        client.post("/api/sonarr/sync", json={"series_id": "seven"}).status_code == 400
     )
     monkeypatch.setattr(sonarr_sync_service, "trigger", lambda **kwargs: False)
     assert client.post("/api/sonarr/sync", json={}).status_code == 409

@@ -1,14 +1,14 @@
 [project]
 name = "aniworld"
-version = "5.0.3"
+version = "5.1.1"
 authors = [{ name = "Phoenixthrush UwU", email = "contact@phoenixthrush.com" }]
 maintainers = [
   { name = "Phoenixthrush UwU", email = "contact@phoenixthrush.com" },
-  { name = "Sirox", email = "iloveshell@proton.me"}
+  { name = "Sirox", email = "iloveshell@proton.me" },
 ]
 description = "AniWorld-Downloader is a command-line tool for downloading and streaming movies and series."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 # requires version numbers from 06/2026
 dependencies = [
   "certifi",                                                                  # CA bundle for bundled runtimes
@@ -37,18 +37,13 @@ license-files = ["LICENSE"]
 
 [project.optional-dependencies]
 sso = [
-  "authlib",                                                                  # >=3.10
+  "authlib", # >=3.10
 ]
 discord = [
-  "discord.py",                                                               # optional Discord request bot
+  "discord.py", # optional Discord request bot
 ]
-test = [
-  "pytest",
-]
-all = [
-  "authlib",
-  "discord.py",
-]
+test = ["pytest"]
+all = ["authlib", "discord.py"]
 
 
 [project.urls]
@@ -84,19 +79,8 @@ aniworld = [
 aniworld = "aniworld.__main__:main"
 aniworld-sonarr-sync = "aniworld.sonarr_sync:main"
 
-[tool.ruff.lint.per-file-ignores]
-# schedule.py works on naive wall-clock datetimes by design: that is what keeps
-# a cron line at 22:00 across a DST switch. Its tests build them by hand, so the
-# "always pass a timezone" rule does not apply to them.
-"tests/test_schedule.py" = ["DTZ001"]
-# Both set an environment variable that has to be in place before aniworld is
-# imported, so their imports cannot all sit at the top of the file.
-"tests/autosync_simulation.py" = ["E402"]
-"tests/conftest.py" = ["E402"]
-
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-# The two legacy scripts in tests/ are manual smoke checks against the live
-# sites. They expose no test functions, so pytest collects nothing from them.
+# Manual test_providers_*.py scripts are excluded in tests/conftest.py.
 python_files = ["test_*.py"]
 addopts = "--strict-markers"

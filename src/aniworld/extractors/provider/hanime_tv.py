@@ -1,4 +1,3 @@
-import base64
 import json
 import re
 import threading
@@ -6,12 +5,14 @@ import time
 import unicodedata
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from html import unescape
-from urllib.parse import unquote, urljoin, urlparse
+from urllib.parse import quote, unquote, urlencode, urljoin, urlparse
 
 import niquests
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+from ...common.search import limit_results, validate_limit
 
 try:
     from ...config import DEFAULT_USER_AGENT, GLOBAL_SESSION, logger
@@ -20,8 +21,10 @@ try:
         playwright_get_hanime_manifest_token,
         solve_captcha,
     )
+    from ..common import decode_base64url, extract_video_metadata
 except ImportError:
     from aniworld.config import DEFAULT_USER_AGENT, GLOBAL_SESSION, logger
+    from aniworld.extractors.common import decode_base64url, extract_video_metadata
     from aniworld.playwright.captcha import (
         is_captcha_page,
         playwright_get_hanime_manifest_token,
@@ -33,6 +36,7 @@ HANIME_BASE_URL = "https://hanime.tv"
 HANIME_VIDEO_URL = f"{HANIME_BASE_URL}/videos/hentai/{{slug}}"
 HANIME_SITEMAP_URL = f"{HANIME_BASE_URL}/sitemap.xml"
 HANIME_TRENDING_URL = f"{HANIME_BASE_URL}/browse/trending"
+HANIME_TAGS_URL = f"{HANIME_BASE_URL}/browse/tags"
 
 _HANIME_HEADERS = {
     "User-Agent": DEFAULT_USER_AGENT,
@@ -58,11 +62,11 @@ def _parse_iso_datetime(value):
     if not value:
         return None
     try:
-        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(value)
     except ValueError:
         return None
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
     return dt
 
 
@@ -173,19 +177,7 @@ def _build_synthetic_payload(slug, html):
     title_text = _meta_content(html, "og:title")
     title_match = re.match(r"^Watch\s+(.+?)\s+Hentai Video", title_text, re.IGNORECASE)
 
-    ldjson = {}
-    for raw in re.findall(
-        r"<script\b[^>]*type=[\"']application/ld\+json[\"'][^>]*>(.*?)</script>",
-        html,
-        re.IGNORECASE | re.DOTALL,
-    ):
-        try:
-            parsed = json.loads(unescape(raw.strip()))
-        except (json.JSONDecodeError, TypeError):
-            continue
-        if isinstance(parsed, dict) and parsed.get("@type") == "VideoObject":
-            ldjson = parsed
-            break
+    ldjson = extract_video_metadata(html)
 
     video_title = (
         ldjson.get("name")
@@ -309,21 +301,15 @@ def fetch_hanime_api_data(slug):
     return _build_synthetic_payload(slug, _request_hanime(page_url).text)
 
 
-def _decode_urlsafe_base64(value):
-    if isinstance(value, str):
-        value = value.encode("ascii")
-    return base64.urlsafe_b64decode(value + b"=" * (-len(value) % 4))
-
-
 def _parse_hanime_manifest_token(token):
     """Decrypt the official handshake token returned by auth.hanime.tv."""
     try:
-        envelope = json.loads(_decode_urlsafe_base64(token))
-        ciphertext_and_tag = _decode_urlsafe_base64(
-            envelope["data"]
-        ) + _decode_urlsafe_base64(envelope["tag"])
+        envelope = json.loads(decode_base64url(token))
+        ciphertext_and_tag = decode_base64url(envelope["data"]) + decode_base64url(
+            envelope["tag"]
+        )
         plaintext = AESGCM(_HANIME_AES_KEY).decrypt(
-            _decode_urlsafe_base64(envelope["iv"]),
+            decode_base64url(envelope["iv"]),
             ciphertext_and_tag,
             _HANIME_AES_HEADER,
         )
@@ -458,13 +444,38 @@ def _rank_hanime_slugs(slugs, keyword, limit=24):
             continue
         seen_franchises.add(franchise_key)
         results.append(slug)
-        if len(results) >= limit:
+        if limit is not None and len(results) >= limit:
             break
     return results
 
 
-def search_hanime(keyword, limit=24):
-    """Search Hanime without a third-party API, using hanime.tv's sitemap."""
+def search_hanime(keyword="", limit=24, *, genre=None, sort=None):
+    """Search the sitemap, or fetch video cards from a genre's first page.
+
+    Genre results can be filtered by keyword and are capped by limit.
+    Pass limit=None to return all cards on the genre page.
+    sort is passed as the site's order parameter; omit it for recent uploads.
+    """
+    validate_limit(limit)
+    if limit == 0:
+        return []
+    if sort and not genre:
+        raise ValueError("Hanime sorting requires a genre.")
+    if genre:
+        url = f"{HANIME_BASE_URL}/browse/tags/{quote(genre, safe='')}"
+        if sort:
+            url += "?" + urlencode({"order": sort})
+        results = _extract_video_cards(_request_hanime(url).text)
+        if keyword:
+            term = keyword.casefold()
+            results = [
+                result
+                for result in results
+                if term in result["name"].casefold()
+                or term in result["slug"].casefold()
+            ]
+        return limit_results(results, limit)
+
     slugs = _rank_hanime_slugs(_get_sitemap_slugs(), keyword, limit=limit)
 
     def _result(slug):
@@ -506,6 +517,23 @@ def search_hanime(keyword, limit=24):
     workers = min(12, len(slugs))
     with ThreadPoolExecutor(max_workers=workers) as pool:
         return list(pool.map(_result, slugs))
+
+
+def fetch_hanime_genres():
+    """Fetch the currently available genre tags from Hanime's browse page.
+
+    The homepage only links the handful of tags it happens to promote, the
+    browse page lists them all.
+    """
+    page = _request_hanime(HANIME_TAGS_URL).text
+    tags = re.findall(
+        r"<a\b[^>]*href=[\"']/(?:browse/)?tags/([^\"'?#]+)[\"']",
+        page,
+        re.IGNORECASE,
+    )
+    return _dedupe_preserve_order(
+        [unquote(unescape(tag)).strip().rstrip("/") for tag in tags]
+    )
 
 
 def fetch_hanime_trending(limit=24):

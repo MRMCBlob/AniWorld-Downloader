@@ -275,7 +275,9 @@ def _rebuild_legacy_queue(conn):
         "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'download_queue'"
     ).fetchone()
     sql = (row["sql"] if row else "") or ""
-    old_custom = any(status in sql for status in ("downloading", "verifying", "imported"))
+    old_custom = any(
+        status in sql for status in ("downloading", "verifying", "imported")
+    )
     if not old_custom and "'paused'" in sql:
         return
 
@@ -319,12 +321,35 @@ def _rebuild_legacy_queue(conn):
     )
 
     target_columns = [
-        "id", "title", "series_url", "episodes", "total_episodes", "language",
-        "provider", "username", "status", "position", "priority", "current_episode",
-        "current_url", "errors", "custom_path_id", "source", "captcha_url",
-        "discord_user_id", "cancel_requested", "force_cancelled", "attempts",
-        "max_attempts", "next_attempt_at", "last_error", "media_type",
-        "import_status", "created_at", "started_at", "completed_at",
+        "id",
+        "title",
+        "series_url",
+        "episodes",
+        "total_episodes",
+        "language",
+        "provider",
+        "username",
+        "status",
+        "position",
+        "priority",
+        "current_episode",
+        "current_url",
+        "errors",
+        "custom_path_id",
+        "source",
+        "captcha_url",
+        "discord_user_id",
+        "cancel_requested",
+        "force_cancelled",
+        "attempts",
+        "max_attempts",
+        "next_attempt_at",
+        "last_error",
+        "media_type",
+        "import_status",
+        "created_at",
+        "started_at",
+        "completed_at",
     ]
     legacy_columns = {
         item["name"]
@@ -870,7 +895,10 @@ def cancel_queue_item(queue_id, force=False):
         if not item:
             return False, "Item not found"
         if item["status"] not in ("queued", "paused", "running"):
-            return False, "Only queued or running items (including paused) can be cancelled"
+            return (
+                False,
+                "Only queued or running items (including paused) can be cancelled",
+            )
 
         if item["status"] in ("queued", "paused"):
             conn.execute(
@@ -1143,8 +1171,7 @@ def purge_delivered_webhooks(keep_days=7):
 def get_webhook_stats():
     with session() as conn:
         row = conn.execute(
-            "SELECT COUNT(*) AS pending FROM webhook_outbox "
-            "WHERE delivered_at IS NULL"
+            "SELECT COUNT(*) AS pending FROM webhook_outbox WHERE delivered_at IS NULL"
         ).fetchone()
         return {"pending": row["pending"] if row else 0}
 

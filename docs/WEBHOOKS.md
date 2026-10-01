@@ -66,10 +66,11 @@ not reproduce the digest:
 import hashlib
 import hmac
 
+
 def verify(raw_body: bytes, header: str, secret: str) -> bool:
-    expected = "sha256=" + hmac.new(
-        secret.encode(), raw_body, hashlib.sha256
-    ).hexdigest()
+    expected = (
+        "sha256=" + hmac.new(secret.encode(), raw_body, hashlib.sha256).hexdigest()
+    )
     return hmac.compare_digest(expected, header or "")
 ```
 
@@ -128,10 +129,13 @@ SECRET = os.environ["ANIWORLD_WEBHOOK_SECRET"]
 
 @app.post("/webhook/aniworld")
 def aniworld():
-    expected = "sha256=" + hmac.new(
-        SECRET.encode(), request.get_data(), hashlib.sha256
-    ).hexdigest()
-    if not hmac.compare_digest(expected, request.headers.get("X-AniWorld-Signature", "")):
+    expected = (
+        "sha256="
+        + hmac.new(SECRET.encode(), request.get_data(), hashlib.sha256).hexdigest()
+    )
+    if not hmac.compare_digest(
+        expected, request.headers.get("X-AniWorld-Signature", "")
+    ):
         abort(401)
 
     event = request.get_json()
