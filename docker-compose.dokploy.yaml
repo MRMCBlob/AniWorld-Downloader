@@ -48,7 +48,7 @@ services:
       # writes directly into the final series/season directory under /media,
       # then asks Sonarr to rescan that series.
       - /media/jellyfin/storagebox:/media
-
+      - /media/jellyfin:/disk
       # Config, queue database, logs and the Chromium profile.
       #
       # Deliberately a named volume rather than a folder on the storage box:
